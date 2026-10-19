@@ -129,6 +129,35 @@ class HorizonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
             select_point(ds, PointRequest(0.1, -0.1, SYNOPTIC, 24))
 
+    def test_serial_mode_matches_parallel_without_new_physics(self):
+        request = PointRequest(lat=0.1, lon=-0.1, prefix=SYNOPTIC, hours=3)
+        parallel = select_point(fake_dataset(hours=3), request)
+        progress = []
+        serial = select_point(fake_dataset(hours=3), request,
+                              progress=progress.append, fetch_mode="serial")
+        self.assertEqual(serial, parallel)
+        field_logs = [s for s in progress if s.startswith("CHUNK_FIELD:")]
+        ok_logs = [s for s in progress if s.startswith("CHUNK_FIELD_OK:")]
+        self.assertEqual(len(field_logs), len(FIELDS))
+        self.assertEqual(len(ok_logs), len(FIELDS))
+        self.assertTrue(progress[-1].startswith("CHUNKS_OK:"))
+        self.assertNotIn("280.15", str(progress))
+
+    def test_serial_median_only_uses_four_fields(self):
+        request = PointRequest(lat=0.1, lon=-0.1,
+                               prefix=SYNOPTIC, hours=3, p50_only=True)
+        messages = []
+        result = select_point(fake_dataset(hours=3), request,
+                              progress=messages.append, fetch_mode="serial")
+        self.assertEqual(len(result["requested_fields"]), 4)
+        self.assertEqual(len([m for m in messages if m.startswith("CHUNK_FIELD:")]), 4)
+        self.assertEqual(result["returned_hours"], 3)
+
+    def test_unknown_fetch_mode_rejected_before_loading(self):
+        with self.assertRaisesRegex(ValueError, "fetch_mode"):
+            select_point(fake_dataset(hours=3),
+                         PointRequest(0, 0, SYNOPTIC, 3), fetch_mode="other")
+
     def test_progress_callback_marks_remote_chunk_phase_without_values(self):
         messages = []
         out = select_point(fake_dataset(hours=3),
