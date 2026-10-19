@@ -214,3 +214,31 @@ using `WN3_READ_TIMEOUT_SECONDS` (30–900). On timeout the script emits
 forecast. No stored database rows, remote writes or credentials are involved.
 Actual cause of a timeout (slow remote data, permissions, incomplete upstream
 publication or a client-library issue) requires further evidence.
+
+## Opt-in small point I/O probe (GCS read diagnostic)
+
+If a multi-variable Dask read is stuck in CHUNKS and reaches READ_TIMEOUT,
+do **not** rerun the same 24h/12-field operation. This script can request
+just one lead hour and only four source P50 fields, and can fetch the
+four median variables **serially** with the single-threaded Dask scheduler:
+
+    WN3_P50_ONLY=1 WN3_FETCH_MODE=serial WN3_READ_TIMEOUT_SECONDS=120 \
+      bash ~/wn3.sh 41.575945 -0.798424 1
+
+The latitude and longitude above are an example; the output is a local
+single-hour point, **not** a full forecast for production. It still requires
+the operator's existing Google identity. The shell helper uses the same run
+discovery, trusted Zarr metadata, native fields and strict P50 validation
+as the full export. It uses no additional cloud services or database writes.
+
+Each variable emits CHUNK_FIELD and CHUNK_FIELD_OK without reporting values
+or credentials. Failure before the first CHUNK_FIELD_OK suggests even one
+native variable/block is slow or unavailable. Successful 1h/4-field output
+does **not** certify a complete 24h/12-field run, but can isolate
+a Dask-concurrency/total-work bottleneck from a more basic GCS read issue.
+
+The two opt-in environment switches are WN3_P50_ONLY=1 (else 0) and
+WN3_FETCH_MODE=serial (else parallel). Serial mode reduces concurrent
+remote requests and identifies exactly which variable is pending; it is
+not guaranteed to be faster. Stop after the bounded timeout if it still
+does not read. No synthetic values or fallback meteorology are generated.

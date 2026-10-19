@@ -10,6 +10,14 @@ class CloudShellHelperTests(unittest.TestCase):
     def test_shell_syntax_without_gcs_access(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True, capture_output=True)
 
+    def test_optional_p50_serial_diagnostic_is_explicit(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("WN3_P50_ONLY", source)
+        self.assertIn("WN3_FETCH_MODE", source)
+        self.assertIn("--p50-only", source)
+        self.assertIn("--fetch-mode serial", source)
+        self.assertIn('"${EXTRA_READER_ARGS[@]}"', source)
+
     def test_cloudshell_read_is_timed_and_reports_diagnostics(self):
         source = SCRIPT.read_text(encoding='utf-8')
         self.assertIn('timeout --signal=TERM --kill-after=10s', source)
