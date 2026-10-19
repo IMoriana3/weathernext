@@ -134,6 +134,20 @@ class SupabaseRowsTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in rows[0]["p10"].values()))
         self.assertEqual(len(rows[0]["p50"]), len(VARIABLES))
 
+    def test_sparse_hourly_median_blocks_entire_cache_batch(self):
+        doc = fixture(hours=24)
+        doc["samples"][7]["native_values"]["temperature_2m_p50"] = None
+        with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
+            convert(doc)
+
+    def test_entire_empty_hour_blocks_import_even_with_valid_other_hours(self):
+        doc = fixture(hours=24)
+        doc["samples"][3]["native_values"] = {
+            name: None for name in doc["requested_fields"]
+        }
+        with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
+            convert(doc)
+
     def test_rejects_wrong_site_even_when_planta_id_is_valid(self):
         doc = fixture()
         doc["requested_grid_point"]["lat"] += 0.3
