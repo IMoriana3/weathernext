@@ -179,8 +179,18 @@ def build_rows(payload: dict, *, planta_id: int, site_lat: float,
             **quantiles,
             "provenance": provenance,
         })
-    if not has_temp or not has_wind:
-        raise ValueError("no finite temperature or wind median over requested hours")
+    # Mandatory median coverage must be 100% for the requested horizon.
+    # Some runs expose zarr.json and coordinate steps before all numerical
+    # chunks are present. Do not cache sparse output as a valid 24h forecast.
+    missing = {
+        field: [sample["lead_hour"] for sample in samples
+                if sample["native_values"][field] is None]
+        for field in P50_FIELDS
+    }
+    missing = {key: hours for key, hours in missing.items() if hours}
+    if missing:
+        detail = "; ".join(f"{key}: {len(hours)} missing" for key, hours in missing.items())
+        raise ValueError("INCOMPLETE_HOURLY_VALUES: " + detail)
     return rows
 
 
