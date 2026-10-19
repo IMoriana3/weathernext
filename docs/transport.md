@@ -47,6 +47,41 @@ Run Python 3.12 and install the pinned requirements, then use:
 
 Public CI runs these tests against **synthetic arrays only**. It never reads private upstream data, authenticates to Google or publishes artifacts.
 
+## Discovery of the current Zarr v3 run
+
+The first interactive export helper searched specifically for
+`.zmetadata`, which is a **legacy Zarr v2 metadata filename**. Google
+documents WeatherNext 3 as **Zarr v3**, with root `zarr.json` metadata.
+That mistake could produce a false "no recent run" even when runs exist.
+
+The discovery helper in `scripts/discover_run.py` now:
+
+1. Lists only dated prefixes (3 UTC days by default; maximum 7) using
+   `gcloud storage ls gs://.../YYYYMMDD_*` with the Google identity
+   already logged into Cloud Shell.
+2. Extracts **synoptic runs only** from the returned folder/object paths
+   (00/06/12/18 UTC). It does not enumerate or download global grids.
+3. Sorts runs newest first and checks each candidate's *exact* root
+   `predictions.zarr/zarr.json` object, with a maximum of 8 metadata checks.
+4. Distinguishes `ACCESS_DENIED`, `GCLOUD_LIST_ERROR`,
+   `NO_RECENT_RUN_FOLDERS` and `NO_VERIFIED_METADATA`. It never
+   assumes a date or proceeds to download a guessed run.
+5. Gives the chosen existing prefix to the unchanged point reader,
+   which independently checks that all requested hours/fields exist.
+
+The archive may contain older runs even if no recent run is visible.
+For an approved, manually selected historical run, supply the exact
+relative run prefix as an optional fourth argument:
+
+    bash scripts/cloudshell_latest.sh 0 0 3 \
+      'weathernext_3_0_0_statistics/zarr/2026_to_present/20260101_01hr_01_preds/predictions.zarr'
+
+That example is **historical/interim (48h maximum)** and must not be
+presented as a current forecast. It requires the same authorized
+identity as the live reader. All data files remain local and ignored
+by Git. Offline tests mock all Google listings and never issue network
+requests.
+
 ## One-step authorized Cloud Shell export (manual only)
 
 An interactive Google Cloud Shell user with existing GCS access can invoke
