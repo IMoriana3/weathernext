@@ -65,13 +65,27 @@ if (( READ_TIMEOUT_SECONDS < 30 || READ_TIMEOUT_SECONDS > 900 )); then
   echo "WN3_READ_TIMEOUT_SECONDS must be from 30 to 900" >&2; exit 2
 fi
 
+# Explicitly opt-in to a low-I/O diagnostic. The normal export stays
+# identical unless these bounded environment switches are set by the operator.
+EXTRA_READER_ARGS=()
+case "${WN3_FETCH_MODE:-parallel}" in
+  parallel) ;;
+  serial) EXTRA_READER_ARGS+=(--fetch-mode serial) ;;
+  *) echo "WN3_FETCH_MODE must be parallel or serial" >&2; exit 2 ;;
+esac
+case "${WN3_P50_ONLY:-0}" in
+  0) ;;
+  1) EXTRA_READER_ARGS+=(--p50-only) ;;
+  *) echo "WN3_P50_ONLY must be 0 or 1" >&2; exit 2 ;;
+esac
+
 OUTPUT="$HOME/weathernext3-$(date -u +%Y%m%dT%H%M%SZ).json"
 echo "[4/4] Reading one grid cell with $HOURS hours (at most 12 native fields; complete P50 required)..."
 echo "Diagnostic: metadata/chunk stages; bounded to ${READ_TIMEOUT_SECONDS}s without publishing partial data."
 if timeout --signal=TERM --kill-after=10s "${READ_TIMEOUT_SECONDS}s" \
     "$VENV/bin/python" "$ROOT/point_reader.py" \
       --lat "$LAT" --lon "$LON" --run-prefix "$FOUND" --hours "$HOURS" \
-      --output "$OUTPUT"; then
+      "${EXTRA_READER_ARGS[@]}" --output "$OUTPUT"; then
   :
 else
   STATUS=$?
