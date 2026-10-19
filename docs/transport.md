@@ -47,6 +47,19 @@ Run Python 3.12 and install the pinned requirements, then use:
 
 Public CI runs these tests against **synthetic arrays only**. It never reads private upstream data, authenticates to Google or publishes artifacts.
 
+## One-step authorized Cloud Shell export (manual only)
+
+An interactive Google Cloud Shell user with existing GCS access can invoke
+`scripts/cloudshell_latest.sh LAT LON [HOURS]` to locate the most recent
+00/06/12/18 UTC run from the previous three days. It inspects only day-scoped
+metadata paths and saves the Zarr transport v2 JSON into the user's HOME
+directory, then prints the filename for Cloud Shell's **Download file** tool.
+
+This helper does not create credentials, activate billing, schedule jobs,
+perform backend uploads, or put data in Git. The first extraction against a
+recent production run still needs manual validation of the user's permissions
+and whether Google has published complete arrays.
+
 ## Authorized interactive usage
 
 Synoptic default 72 hours (substitute a real authorized date for YYYYMMDD):
