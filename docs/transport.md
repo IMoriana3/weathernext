@@ -163,3 +163,37 @@ and cloud fraction, **not** a complete GHI/DNI/DHI triplet suitable for
 canonical production physics. Never fill missing DNI or DHI with synthetic
 zeros or derive bankable uncertainty without evidence. WEATHER informs;
 CONTROL decides.
+
+## Live data-quality regression: early run metadata is not a complete forecast
+
+An authorized WeatherNext 3 statistics point read on 19 October 2026 selected
+the 12:00 UTC run while the Google publication schedule listed approximately
+19:45 UTC as the expected GCS statistics availability. The local extraction
+occurred at 19:14 UTC: before the expected complete release, though whether
+publication timing caused the gaps is **unverified**.
+
+The exported 24 forecast steps and all 12 advertised variables existed,
+but many native numerical values were null: only 5 of 24 hours had all four
+mandatory P50 variables. The old reader's "fields: 12/12" referred to
+variable metadata, **not** 12 complete hourly time series. The older check
+only required any finite temperature and wind over the whole horizon. This is
+classified as a **BUG** in quality gating, with the underlying nulls' origin
+still **UNKNOWN** pending replay after publication.
+
+Regression safeguards now:
+- Default auto-discovery considers synoptic runs at least 9 hours old.
+  This is an explicit **APPROXIMATION**/safety buffer informed by Google's
+  publication schedule; it is not a guarantee of availability or quality.
+  Explicit exact-run historical replay still bypasses that age heuristic.
+- The reader **fails** with INCOMPLETE_HOURLY_VALUES if any of the four
+  mandatory hourly P50 arrays has a null/NaN for a requested hour, even if
+  root zarr.json, coordinates and field names are present.
+- The Supabase adapter independently rejects any such input before
+  preparing or storing database rows. No partial series is represented as a
+  usable continuous 24/72/360-hour forecast.
+- Optional P10/P90 point-level nulls remain explicit nulls; they are not
+  fabricated from P50 and must not be presented as a complete interval.
+- No automatic backfilling or synthesis is performed. Corrected extraction
+  must be revalidated from a sufficiently mature cycle.
+
+Official schedule: https://developers.google.com/weathernext/guides/dissemination
