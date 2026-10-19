@@ -129,6 +129,17 @@ class HorizonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
             select_point(ds, PointRequest(0.1, -0.1, SYNOPTIC, 24))
 
+    def test_progress_callback_marks_remote_chunk_phase_without_values(self):
+        messages = []
+        out = select_point(fake_dataset(hours=3),
+                           PointRequest(0.1, -0.1, SYNOPTIC, 3),
+                           progress=messages.append)
+        self.assertEqual(len(out['samples']), 3)
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(messages[0].startswith('CHUNKS:'))
+        self.assertTrue(messages[1].startswith('CHUNKS_OK:'))
+        self.assertNotIn('280.15', str(messages))
+
     def test_missing_optional_percentile_hour_does_not_fake_a_median(self):
         ds = fake_dataset(hours=24)
         ds["wind_speed_10m_p90"].values[4, 1, 1] = np.nan
