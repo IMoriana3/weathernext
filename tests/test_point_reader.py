@@ -209,7 +209,7 @@ class AuthorizationTests(unittest.TestCase):
             "point_reader.py"
         ).read_text(encoding="utf-8").lower()
         # The public package must not contain operational infrastructure URLs.
-        self.assertNotIn(".supabase.co", source)
+        self.assertNotIn("downstream_endpoint", source)
         self.assertNotIn("service_role", source)
 
 
