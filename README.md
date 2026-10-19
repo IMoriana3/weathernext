@@ -1,25 +1,30 @@
 # WeatherNext 3
 
-Lightweight tools for reading and validating probabilistic weather forecast statistics.
+A minimal, read-only transport for authorized WeatherNext 3 probability statistics stored as Zarr arrays in Google Cloud Storage.
 
-## Scope
+## What is here?
 
-- Read authorized Google Cloud Storage Zarr datasets.
-- Validate a small geographic and temporal sample before any scheduled processing.
-- Keep upstream credentials, downstream destinations, and operational settings outside the repository.
-- Preserve source timestamps, units, quantiles, and provenance.
+- `point_reader.py`: bounded point reader; one grid cell, 1–6 hours and four P50 upstream variables.
+- `tests/`: synthetic tests for coordinates, source timestamps, raw values and missing-data handling.
+- `.github/workflows/verify.yml`: free public GitHub Actions job; runs **offline tests only**.
+- `docs/transport.md`: the versioned input/output transport contract.
 
-This is a data transport workspace, not a separate weather model or control system.
+The program does **not** implement another meteorological model, convert physical units, publish observations or send control commands.
 
-## Access
+## Access and privacy
 
-The upstream datasets require an authorized Google identity. Anonymous requests return `403 AccessDenied`. Public CI does **not** bypass provider access controls.
+The Google bucket is not anonymously readable. An authorized upstream identity is required for interactive reads. No Google credentials, operational coordinates, downstream endpoints or secrets belong in this repository.
 
-## Operating policy
+The CI workflow never accesses the restricted bucket, never retrieves private forecast data and never uploads artifacts.
 
-- No billing activation or paid cloud infrastructure.
-- No credentials, API keys, refresh tokens, project identifiers, site lists, or operational datasets in public files or build logs.
-- No scheduled ingestion until access, authorization, cost, and data-use conditions are verified.
-- No forecasts are interpreted as field measurements or control commands.
+## Cost policy
 
-Initial status: repository scaffold only; automated ingestion is not enabled.
+Additional expenditure: **zero**. No paid services, billing activation, unattended extraction or scheduled jobs are configured.
+
+## Current status
+
+- Bounded transport and offline tests: implemented in a review branch.
+- Authenticated upstream read from a production runner: not validated.
+- Unattended ingestion and downstream publication: **disabled**.
+
+See [transport contract](docs/transport.md) for exact boundaries and limitations.
