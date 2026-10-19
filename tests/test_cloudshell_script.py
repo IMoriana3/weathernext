@@ -10,6 +10,12 @@ class CloudShellHelperTests(unittest.TestCase):
     def test_shell_syntax_without_gcs_access(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True, capture_output=True)
 
+    def test_hourly_window_mode_is_explicit_opt_in(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("hourly) EXTRA_READER_ARGS+=(--fetch-mode hourly)", source)
+        self.assertIn("WN3_FETCH_MODE", source)
+        self.assertIn('"${EXTRA_READER_ARGS[@]}"', source)
+
     def test_optional_p50_serial_diagnostic_is_explicit(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("WN3_P50_ONLY", source)
