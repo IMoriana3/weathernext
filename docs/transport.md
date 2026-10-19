@@ -118,3 +118,48 @@ The statistics bucket requires Google-approved identity; anonymous requests fail
 Do not commit credentials, account details, operational locations or private data. Historical forecasts and recent/future forecasts have different provider licences. This package contains **no scheduler, unattended extraction, external upload or downstream endpoint**.
 
 An offline green test is **not** an authenticated 360-hour upstream read, and does not establish production integration.
+
+## Existing Supabase forecast cache: strictly local row preparation
+
+The optional supabase_rows.py adapter targets the **existing**
+public.meteo_pronosticos table, not a new weather model or a new database.
+Its verified target contract is:
+
+- planta_id (explicit public.plantas.id foreign key), source_id='weathernext3';
+- UTC init_time, valid_time, integer lead_hour;
+- p10, p50, p90 JSON objects of **unchanged upstream native variables**;
+- provenance containing bucket/run, requested/selected grid cell, raw units,
+  available/missing native fields, and explicit no-conversion/no-control flags.
+
+Database uniqueness is (planta_id, source_id, init_time, valid_time).
+An authenticated web user may read according to RLS, but ordinary authenticated
+sessions are **not** a forecast-ingestion credential. Privileged database writes
+require a separately authorized protected server-side channel. This transport
+adapter neither contains nor requests a Supabase key, performs network calls,
+or writes to the database.
+
+After **an actual authorized Zarr point extraction**, select the exact verified
+Supabase plant id and coordinates, and produce local rows:
+
+    python supabase_rows.py --input "$HOME/weathernext3-EXAMPLE.json" --planta-id 123 --site-lat 0 --site-lon 0 --output output/example-supabase-rows.json
+
+The numbers and filename above are **placeholders**, not an actual plant or
+existing forecast. The command refuses mismatched site coordinates, selected
+grid cells farther than 0.11 degrees, invalid run metadata, missing hourly steps,
+missing required P50 fields, bad units and non-finite values. It refuses to
+overwrite an existing output file; outputs are local with file mode 0600.
+The output/ folder is ignored by Git. Do not publish raw exports publicly.
+
+An authorized ingestion implementation can upsert these validated rows against
+the **existing** primary key, with a verification read of row counts, provenance
+and time range afterwards. Until that authenticated step succeeds,
+public.meteo_pronosticos remains empty; no imported data is claimed.
+
+**Contract boundary:** This is a transport/cache adapter, not
+df_meteo_canonical, MeteoReport, or WeatherContract v2. Those are owned by
+IMoriana3/SolarGPTfull (solargpt/CONTRACTS.md). WeatherNext point output
+currently supplies temperature, 10 m wind, hourly downwelling solar radiation
+and cloud fraction, **not** a complete GHI/DNI/DHI triplet suitable for
+canonical production physics. Never fill missing DNI or DHI with synthetic
+zeros or derive bankable uncertainty without evidence. WEATHER informs;
+CONTROL decides.
