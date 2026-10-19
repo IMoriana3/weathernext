@@ -142,7 +142,7 @@ class DiscoveryTests(unittest.TestCase):
         def listing(uri):
             calls.append(uri)
             if uri.endswith("20261019_*"):
-                return ("\\n".join([
+                return ("\n".join([
                     URI + "/" + premature + "/",
                     URI + "/" + mature + "/",
                 ]))
