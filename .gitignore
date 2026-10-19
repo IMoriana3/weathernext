@@ -1,0 +1,27 @@
+# Runtime credentials and environment configuration
+.env
+.env.*
+!.env.example
+*credentials*.json
+*service-account*.json
+*token*.json
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Local data and diagnostic outputs
+.private/
+data/
+artifacts/
+reports/
+output/
+*.log
+
+# Python / local tooling
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
