@@ -113,8 +113,8 @@ def select_point(dataset, request: PointRequest, *, progress=None,
     """Select variables, one location and hourly leads BEFORE .load()."""
     import numpy as np
     emit = progress or (lambda message: None)
-    if fetch_mode not in ("parallel", "serial"):
-        raise ValueError("fetch_mode must be parallel or serial")
+    if fetch_mode not in ("parallel", "serial", "hourly"):
+        raise ValueError("fetch_mode must be parallel, serial or hourly")
 
     axes = ("lat_0p1", "lon_0p1", "lead_time", "init_time")
     missing_axes = [name for name in axes if name not in dataset]
@@ -159,7 +159,38 @@ def select_point(dataset, request: PointRequest, *, progress=None,
     # and <=12 existing P10/P50/P90 variables. Never load a global field.
     emit(f"CHUNKS: fetching {len(present_fields)} fields, "
          f"{request.hours} hourly values each; mode={fetch_mode}")
-    if fetch_mode == "serial":
+    if present_fields:
+        # Structural graph metadata only; never print forecast values or
+        # fetch any additional global chunks for this diagnostic.
+        lead_chunks = subset[present_fields[0]].chunksizes.get("lead_time", ())
+        emit(f"CHUNK_LAYOUT: first field lead_time uses "
+             f"{len(lead_chunks)} lazy chunk(s)")
+    if fetch_mode == "hourly":
+        # Independently materialize one requested lead hour at a time. This
+        # restricts each active Dask graph, exposes the first slow lead and
+        # fails at the earliest unavailable mandatory median. It may cost
+        # more remote requests than a single multi-hour read.
+        import xarray as xr
+        loaded_hours = []
+        for i, lead in enumerate(lead_hours):
+            emit(f"CHUNK_HOUR: {i + 1}/{request.hours} lead={lead}")
+            one_hour = subset.isel(
+                lead_time=slice(i, i + 1)
+            ).load(scheduler="single-threaded")
+            for field in P50_FIELDS:
+                native = np.asarray(one_hour[field].values)
+                if native.size != 1 or not np.isfinite(native.item()):
+                    raise ValueError(
+                        f"INCOMPLETE_HOURLY_VALUES: {field} missing "
+                        f"at lead hour {lead}; refusing incomplete forecast"
+                    )
+            loaded_hours.append(one_hour)
+            emit(f"CHUNK_HOUR_OK: {i + 1}/{request.hours} lead={lead}")
+        subset = xr.concat(
+            loaded_hours, dim="lead_time", join="exact",
+            coords="minimal", compat="equals",
+        )
+    elif fetch_mode == "serial":
         # Keep one Dask graph active at a time for remote GCS diagnosis:
         # fewer concurrent object requests and a progress marker per field.
         # This does NOT make remote access instantaneous or guarantee validity.
@@ -271,9 +302,10 @@ def _parse_args(argv=None):
                         help="72h default; max 360h synoptic or 48h interim")
     parser.add_argument("--p50-only", action="store_true",
                         help="Read only four P50 variables instead of P10/P50/P90")
-    parser.add_argument("--fetch-mode", choices=("parallel", "serial"),
+    parser.add_argument("--fetch-mode", choices=("parallel", "serial", "hourly"),
                         default="parallel",
-                        help="serial: one variable at a time, single-threaded Dask; diagnostic only")
+                        help=("serial: one variable at a time; hourly: one lead hour "
+                              "at a time, both single-threaded; diagnostic only"))
     parser.add_argument("--output", type=Path, default=None,
                         help="Write native samples locally (never to stdout)")
     return parser.parse_args(argv)
