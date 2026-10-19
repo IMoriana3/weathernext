@@ -1,30 +1,39 @@
 # WeatherNext 3
 
-A minimal, read-only transport for authorized WeatherNext 3 probability statistics stored as Zarr arrays in Google Cloud Storage.
+Minimal, read-only transport for authorized probabilistic forecast statistics stored as Zarr arrays in Google Cloud Storage.
 
-## What is here?
+## Hourly forecast horizons
 
-- `point_reader.py`: bounded point reader; one grid cell, 1–6 hours and four P50 upstream variables.
-- `tests/`: synthetic tests for coordinates, source timestamps, raw values and missing-data handling.
-- `.github/workflows/verify.yml`: free public GitHub Actions job; runs **offline tests only**.
-- `docs/transport.md`: the versioned input/output transport contract.
+| Run initialization (UTC) | Default request | Maximum available |
+|---|---:|---:|
+| Synoptic: 00, 06, 12, 18 | **72 h** | **360 h (15 days)** |
+| Interim: all other hours | Request up to 48 h explicitly | **48 h** |
 
-The program does **not** implement another meteorological model, convert physical units, publish observations or send control commands.
+The reader enforces the correct horizon **before accessing storage**. It rejects truncated or non-hourly forecasts instead of silently labeling them complete.
 
-## Access and privacy
+For one geographic grid cell, it reads up to **12 native source fields**: temperature, 10 m wind speed, 1-hour downwelling shortwave solar radiation and total cloud cover, each at P10/P50/P90. Optional percentiles absent upstream are reported as missing, never invented. Use \`--p50-only\` to read only the four medians.
 
-The Google bucket is not anonymously readable. An authorized upstream identity is required for interactive reads. No Google credentials, operational coordinates, downstream endpoints or secrets belong in this repository.
+## Contents
 
-The CI workflow never accesses the restricted bucket, never retrieves private forecast data and never uploads artifacts.
+- \`point_reader.py\` — bounded GCS Zarr transport; selects variables, grid cell and lead times before loading data.
+- \`tests/\` — isolated regression tests for 48/72/360 h, percentiles, units, longitude seam and missing data.
+- \`.github/workflows/verify.yml\` — offline tests on standard public GitHub Actions runners.
+- \`docs/transport.md\` — schema, safety and runtime contract.
+
+No weather physics, unit conversion, control decisions or downstream system dependencies are implemented.
+
+## Authentication and privacy
+
+Google's statistics bucket requires an approved identity. Anonymous requests return \`403 AccessDenied\`; this repository does not contain tokens, cloud account details, private site coordinates or destinations. CI uses synthetic arrays only, never reads upstream or publishes forecast artifacts.
 
 ## Cost policy
 
-Additional expenditure: **zero**. No paid services, billing activation, unattended extraction or scheduled jobs are configured.
+**Additional expenditure: zero.** No billing activation, paid services, scheduled extraction or automatic uploads.
+
+Google lists the **statistics** bucket as *Requester Pays OFF*. This does not prove every network or processing operation has no cost; use only explicitly approved interactive access for remote tests.
 
 ## Current status
 
-- Bounded transport and offline tests: implemented in a review branch.
-- Authenticated upstream read from a production runner: not validated.
-- Unattended ingestion and downstream publication: **disabled**.
+Source and offline tests are integrated. An authenticated 360-hour live read and an unattended access method are **not yet validated**. The repository does not fetch data automatically.
 
-See [transport contract](docs/transport.md) for exact boundaries and limitations.
+See [transport contract](docs/transport.md) for full usage details and limits.
