@@ -20,7 +20,7 @@ HOURS=$((10#$HOURS))
 if (( HOURS < 1 || HOURS > 360 )); then
   echo "HOURS must be from 1 to 360" >&2; exit 2
 fi
-for required in gcloud python3 git; do
+for required in gcloud python3 git timeout; do
   if ! command -v "$required" >/dev/null 2>&1; then
     echo "Missing required Cloud Shell tool: $required" >&2; exit 2
   fi
@@ -56,11 +56,31 @@ if [[ ! -x "$VENV/bin/python" ]]; then python3 -m venv "$VENV"; fi
 echo "[3/4] Installing/verifying pinned Zarr dependencies..."
 "$VENV/bin/python" -m pip --disable-pip-version-check install -q -r "$ROOT/requirements.txt"
 
+READ_TIMEOUT_SECONDS="${WN3_READ_TIMEOUT_SECONDS:-300}"
+if ! [[ "$READ_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || (( ${#READ_TIMEOUT_SECONDS} > 4 )); then
+  echo "WN3_READ_TIMEOUT_SECONDS must be an integer from 30 to 900" >&2; exit 2
+fi
+READ_TIMEOUT_SECONDS=$((10#$READ_TIMEOUT_SECONDS))
+if (( READ_TIMEOUT_SECONDS < 30 || READ_TIMEOUT_SECONDS > 900 )); then
+  echo "WN3_READ_TIMEOUT_SECONDS must be from 30 to 900" >&2; exit 2
+fi
+
 OUTPUT="$HOME/weathernext3-$(date -u +%Y%m%dT%H%M%SZ).json"
 echo "[4/4] Reading one grid cell with $HOURS hours (at most 12 native fields; complete P50 required)..."
-"$VENV/bin/python" "$ROOT/point_reader.py" \
-  --lat "$LAT" --lon "$LON" --run-prefix "$FOUND" --hours "$HOURS" \
-  --output "$OUTPUT"
+echo "Diagnostic: metadata/chunk stages; bounded to ${READ_TIMEOUT_SECONDS}s without publishing partial data."
+if timeout --signal=TERM --kill-after=10s "${READ_TIMEOUT_SECONDS}s" \
+    "$VENV/bin/python" "$ROOT/point_reader.py" \
+      --lat "$LAT" --lon "$LON" --run-prefix "$FOUND" --hours "$HOURS" \
+      --output "$OUTPUT"; then
+  :
+else
+  STATUS=$?
+  if (( STATUS == 124 || STATUS == 137 )); then
+    echo "READ_TIMEOUT: remote GCS metadata or chunks did not complete; no forecast was exported." >&2
+    echo "Retry with an older verified run or diagnose the stage shown above." >&2
+  fi
+  exit "$STATUS"
+fi
 echo "FILE READY: $OUTPUT"
-echo "Use Cloud Shell's Download file command to save it to your computer."
+echo "Use Cloud Shell\'s Download file command to save it to your computer."
 echo "Do not commit the generated file to a public repository."

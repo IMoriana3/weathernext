@@ -108,9 +108,10 @@ def _nearest_circular_longitude(dataset, longitude):
     return int(np.argmin(distances))
 
 
-def select_point(dataset, request: PointRequest):
+def select_point(dataset, request: PointRequest, *, progress=None):
     """Select variables, one location and hourly leads BEFORE .load()."""
     import numpy as np
+    emit = progress or (lambda message: None)
 
     axes = ("lat_0p1", "lon_0p1", "lead_time", "init_time")
     missing_axes = [name for name in axes if name not in dataset]
@@ -153,7 +154,9 @@ def select_point(dataset, request: PointRequest):
 
     # Materialization is bounded to one grid cell, <=360 time steps,
     # and <=12 existing P10/P50/P90 variables. Never load a global field.
+    emit("CHUNKS: fetching hourly forecast values for one grid cell")
     subset = subset.load()
+    emit("CHUNKS_OK: numeric values received; validating hourly completeness")
 
     samples = []
     for idx, lead_hour in enumerate(lead_hours):
@@ -221,18 +224,21 @@ def select_point(dataset, request: PointRequest):
     }
 
 
-def read_gcs_point(request: PointRequest):
+def read_gcs_point(request: PointRequest, *, progress=None):
     """GCS with authorized ambient identity; anonymous calls are refused."""
+    emit = progress or (lambda message: None)
     if os.environ.get("GOOGLE_SKIP_SIGNATURE", "").lower() == "true":
         raise ValueError("anonymous access is not allowed for this dataset")
     from obstore.store import GCSStore
     import xarray as xr
     from zarr.storage import ObjectStore
 
+    emit("METADATA: connecting to authorized GCS Zarr store")
     store = GCSStore(bucket=BUCKET, prefix=request.prefix)
     dataset = xr.open_zarr(ObjectStore(store), chunks={})
+    emit("METADATA_OK: opening finished; selecting site and requested hours")
     try:
-        return select_point(dataset, request)
+        return select_point(dataset, request, progress=progress)
     finally:
         dataset.close()
 
@@ -256,7 +262,10 @@ def main(argv=None):
     try:
         request = PointRequest(args.lat, args.lon, args.run_prefix,
                                args.hours, args.p50_only)
-        result = read_gcs_point(request)
+        result = read_gcs_point(
+            request,
+            progress=lambda message: print(message, file=sys.stderr, flush=True),
+        )
         if args.output is not None:
             path = args.output.expanduser().resolve()
             path.parent.mkdir(parents=True, exist_ok=True)

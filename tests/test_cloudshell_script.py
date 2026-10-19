@@ -10,6 +10,13 @@ class CloudShellHelperTests(unittest.TestCase):
     def test_shell_syntax_without_gcs_access(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True, capture_output=True)
 
+    def test_cloudshell_read_is_timed_and_reports_diagnostics(self):
+        source = SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('timeout --signal=TERM --kill-after=10s', source)
+        self.assertIn('READ_TIMEOUT:', source)
+        self.assertIn('WN3_READ_TIMEOUT_SECONDS', source)
+        self.assertIn('METADATA:', (SCRIPT.parents[1] / 'point_reader.py').read_text())
+
     def test_horizon_gate_precedes_any_google_call(self):
         run = subprocess.run(
             ["bash", str(SCRIPT), "0", "0", "361"],

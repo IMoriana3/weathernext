@@ -197,3 +197,20 @@ Regression safeguards now:
   must be revalidated from a sufficiently mature cycle.
 
 Official schedule: https://developers.google.com/weathernext/guides/dissemination
+
+## Step 4 Cloud Shell diagnostics and bounded remote reads
+
+The GCS reader now logs coarse progress markers to stderr only (no raw
+forecast values or credentials): METADATA, METADATA_OK, CHUNKS, CHUNKS_OK.
+If a manual run stops at METADATA, the remote Zarr metadata open is pending.
+If it stops at CHUNKS, selected grid-cell arrays are still being retrieved.
+This does not by itself prove a network or application defect.
+
+The optional Cloud Shell script runs the point reader via GNU `timeout`,
+with a 300-second default and a 10-second force-kill grace period.
+The interactive user may choose an explicitly bounded alternative
+using `WN3_READ_TIMEOUT_SECONDS` (30–900). On timeout the script emits
+`READ_TIMEOUT`, exits nonzero and never reports a successfully exported
+forecast. No stored database rows, remote writes or credentials are involved.
+Actual cause of a timeout (slow remote data, permissions, incomplete upstream
+publication or a client-library issue) requires further evidence.
