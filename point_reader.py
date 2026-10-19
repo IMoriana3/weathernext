@@ -174,10 +174,26 @@ def select_point(dataset, request: PointRequest):
             "native_values": values,
         })
 
-    if not any(s["native_values"]["temperature_2m_p50"] is not None for s in samples):
-        raise ValueError("no finite temperature values at the selected point")
-    if not any(s["native_values"]["wind_speed_10m_p50"] is not None for s in samples):
-        raise ValueError("no finite wind values at the selected point")
+    # A Zarr root may appear before the forecast's numerical chunks are
+    # fully disseminated. A complete coordinate axis and 12 listed variables
+    # do NOT prove that hourly P50 values have arrived. Fail closed rather
+    # than publishing a sparse forecast as 24/72/360 valid hours.
+    incomplete = {
+        field: [s["lead_hour"] for s in samples
+                if s["native_values"][field] is None]
+        for field in P50_FIELDS
+    }
+    incomplete = {field: hours for field, hours in incomplete.items() if hours}
+    if incomplete:
+        details = "; ".join(
+            f"{field}: {len(hours)}/{request.hours} hours missing "
+            f"(first lead {hours[0]})"
+            for field, hours in incomplete.items()
+        )
+        raise ValueError(
+            "INCOMPLETE_HOURLY_VALUES: required P50 series contain gaps; "
+            + details + ". A newer run may still be publishing."
+        )
 
     return {
         "transport_schema": "weathernext3-zarr-point-v2",

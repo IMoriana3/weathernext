@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ "${1:-}" == "--help" || "$#" -lt 2 || "$#" -gt 4 ]]; then
   echo "Usage: bash cloudshell_latest.sh LATITUDE LONGITUDE [HOURS=72] [EXACT_RUN_PREFIX]" >&2
   echo "Run interactively in an authorized Google Cloud Shell session." >&2
-  echo "No override: find the newest run with Zarr v3 metadata. Exact prefix: historical replay." >&2
+  echo "No override: newest Zarr v3 run at least 9h old. Exact prefix: historical replay." >&2
   exit 2
 fi
 
@@ -38,8 +38,8 @@ else
 fi
 FOUND="${4:-}"
 if [[ -z "$FOUND" ]]; then
-  echo "[2/4] Looking for the latest 00/06/12/18 UTC Zarr v3 run (3 UTC days)..."
-  if ! FOUND="$(python3 "$ROOT/scripts/discover_run.py" --lookback-days 3)"; then
+  echo "[2/4] Looking for a mature 00/06/12/18 UTC Zarr v3 run (3 UTC days; 9h buffer)..."
+  if ! FOUND="$(python3 "$ROOT/scripts/discover_run.py" --lookback-days 3 --min-age-hours 9)"; then
     echo "No data was exported. Check the diagnostic above; no run was guessed." >&2
     exit 1
   fi
@@ -57,7 +57,7 @@ echo "[3/4] Installing/verifying pinned Zarr dependencies..."
 "$VENV/bin/python" -m pip --disable-pip-version-check install -q -r "$ROOT/requirements.txt"
 
 OUTPUT="$HOME/weathernext3-$(date -u +%Y%m%dT%H%M%SZ).json"
-echo "[4/4] Reading one grid cell with $HOURS hours (at most 12 native fields)..."
+echo "[4/4] Reading one grid cell with $HOURS hours (at most 12 native fields; complete P50 required)..."
 "$VENV/bin/python" "$ROOT/point_reader.py" \
   --lat "$LAT" --lon "$LON" --run-prefix "$FOUND" --hours "$HOURS" \
   --output "$OUTPUT"

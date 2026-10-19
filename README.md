@@ -38,6 +38,18 @@ The `scripts/cloudshell_latest.sh` helper searches dated GCS run folders for the
 
 Example for an arbitrary location: `bash scripts/cloudshell_latest.sh 40 -3 72`. Do not commit generated outputs.
 
+## Existing Supabase forecast-cache adapter
+
+The optional supabase_rows.py prepares offline, point-validated JSON rows for
+the already existing public.meteo_pronosticos cache. It does **not** read Google,
+connect to Supabase or store secrets. Select the verified plant id and
+coordinates explicitly and write into the Git-ignored output/ directory.
+It keeps raw upstream units and percentile values; it does not calculate DNI,
+DHI, operational control commands or a second WeatherContract.
+
+See docs/transport.md for the exact command, validation rules, database
+primary key, authorized-write boundary and current limitations.
+
 ## Current status
 
 Source and offline tests are integrated. An authenticated 360-hour live read and an unattended access method are **not yet validated**. The repository does not fetch data automatically.

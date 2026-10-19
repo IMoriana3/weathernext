@@ -118,3 +118,82 @@ The statistics bucket requires Google-approved identity; anonymous requests fail
 Do not commit credentials, account details, operational locations or private data. Historical forecasts and recent/future forecasts have different provider licences. This package contains **no scheduler, unattended extraction, external upload or downstream endpoint**.
 
 An offline green test is **not** an authenticated 360-hour upstream read, and does not establish production integration.
+
+## Existing Supabase forecast cache: strictly local row preparation
+
+The optional supabase_rows.py adapter targets the **existing**
+public.meteo_pronosticos table, not a new weather model or a new database.
+Its verified target contract is:
+
+- planta_id (explicit public.plantas.id foreign key), source_id='weathernext3';
+- UTC init_time, valid_time, integer lead_hour;
+- p10, p50, p90 JSON objects of **unchanged upstream native variables**;
+- provenance containing bucket/run, requested/selected grid cell, raw units,
+  available/missing native fields, and explicit no-conversion/no-control flags.
+
+Database uniqueness is (planta_id, source_id, init_time, valid_time).
+An authenticated web user may read according to RLS, but ordinary authenticated
+sessions are **not** a forecast-ingestion credential. Privileged database writes
+require a separately authorized protected server-side channel. This transport
+adapter neither contains nor requests a Supabase key, performs network calls,
+or writes to the database.
+
+After **an actual authorized Zarr point extraction**, select the exact verified
+Supabase plant id and coordinates, and produce local rows:
+
+    python supabase_rows.py --input "$HOME/weathernext3-EXAMPLE.json" --planta-id 123 --site-lat 0 --site-lon 0 --output output/example-supabase-rows.json
+
+The numbers and filename above are **placeholders**, not an actual plant or
+existing forecast. The command refuses mismatched site coordinates, selected
+grid cells farther than 0.11 degrees, invalid run metadata, missing hourly steps,
+missing required P50 fields, bad units and non-finite values. It refuses to
+overwrite an existing output file; outputs are local with file mode 0600.
+The output/ folder is ignored by Git. Do not publish raw exports publicly.
+
+An authorized ingestion implementation can upsert these validated rows against
+the **existing** primary key, with a verification read of row counts, provenance
+and time range afterwards. Until that authenticated step succeeds,
+public.meteo_pronosticos remains empty; no imported data is claimed.
+
+**Contract boundary:** This is a transport/cache adapter, not
+df_meteo_canonical, MeteoReport, or WeatherContract v2. Those are owned by
+IMoriana3/SolarGPTfull (solargpt/CONTRACTS.md). WeatherNext point output
+currently supplies temperature, 10 m wind, hourly downwelling solar radiation
+and cloud fraction, **not** a complete GHI/DNI/DHI triplet suitable for
+canonical production physics. Never fill missing DNI or DHI with synthetic
+zeros or derive bankable uncertainty without evidence. WEATHER informs;
+CONTROL decides.
+
+## Live data-quality regression: early run metadata is not a complete forecast
+
+An authorized WeatherNext 3 statistics point read on 19 October 2026 selected
+the 12:00 UTC run while the Google publication schedule listed approximately
+19:45 UTC as the expected GCS statistics availability. The local extraction
+occurred at 19:14 UTC: before the expected complete release, though whether
+publication timing caused the gaps is **unverified**.
+
+The exported 24 forecast steps and all 12 advertised variables existed,
+but many native numerical values were null: only 5 of 24 hours had all four
+mandatory P50 variables. The old reader's "fields: 12/12" referred to
+variable metadata, **not** 12 complete hourly time series. The older check
+only required any finite temperature and wind over the whole horizon. This is
+classified as a **BUG** in quality gating, with the underlying nulls' origin
+still **UNKNOWN** pending replay after publication.
+
+Regression safeguards now:
+- Default auto-discovery considers synoptic runs at least 9 hours old.
+  This is an explicit **APPROXIMATION**/safety buffer informed by Google's
+  publication schedule; it is not a guarantee of availability or quality.
+  Explicit exact-run historical replay still bypasses that age heuristic.
+- The reader **fails** with INCOMPLETE_HOURLY_VALUES if any of the four
+  mandatory hourly P50 arrays has a null/NaN for a requested hour, even if
+  root zarr.json, coordinates and field names are present.
+- The Supabase adapter independently rejects any such input before
+  preparing or storing database rows. No partial series is represented as a
+  usable continuous 24/72/360-hour forecast.
+- Optional P10/P90 point-level nulls remain explicit nulls; they are not
+  fabricated from P50 and must not be presented as a complete interval.
+- No automatic backfilling or synthesis is performed. Corrected extraction
+  must be revalidated from a sufficiently mature cycle.
+
+Official schedule: https://developers.google.com/weathernext/guides/dissemination

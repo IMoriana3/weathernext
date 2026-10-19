@@ -25,3 +25,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Native forecasts and prepared Supabase row exports
+*supabase-rows.json
+weathernext3-*.json

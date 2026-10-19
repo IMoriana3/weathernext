@@ -8,7 +8,7 @@ from scripts.discover_run import (
     discover_recent_synoptic,
 )
 
-NOW = datetime(2026, 10, 19, 16, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 19, 22, tzinfo=timezone.utc)
 
 
 def run_uri(folder):
@@ -55,7 +55,8 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result, BASE + "/" + expected + "/predictions.zarr")
         self.assertTrue(any(x.endswith("/zarr.json") for x in calls))
         self.assertFalse(any(".zmetadata" in x for x in calls))
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)  # 18Z is younger than 9h
+        self.assertFalse(any(metadata("20261019_18hr_01_preds") == x for x in calls))
 
     def test_falls_back_one_day_but_never_guesses_a_run(self):
         folder = "20261018_18hr_01_preds"
@@ -131,6 +132,36 @@ class DiscoveryTests(unittest.TestCase):
             discover_recent_synoptic(
                 now=NOW, list_uri=lookup, max_checks=3,
             )
+
+
+    def test_skips_12z_before_publication_and_selects_mature_06z(self):
+        early = datetime(2026, 10, 19, 19, 14, tzinfo=timezone.utc)
+        mature = "20261019_06hr_01_preds"
+        premature = "20261019_12hr_01_preds"
+        calls = []
+        def listing(uri):
+            calls.append(uri)
+            if uri.endswith("20261019_*"):
+                return ("\n".join([
+                    URI + "/" + premature + "/",
+                    URI + "/" + mature + "/",
+                ]))
+            if uri == metadata(mature):
+                return uri
+            self.fail("Premature or unexpected metadata listing: " + uri)
+        got = discover_recent_synoptic(now=early, list_uri=listing)
+        self.assertEqual(got, BASE + "/" + mature + "/predictions.zarr")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn(metadata(premature), calls)
+
+    def test_only_premature_runs_report_explicit_error(self):
+        early = datetime(2026, 10, 19, 19, 14, tzinfo=timezone.utc)
+        def listing(uri):
+            if uri.endswith("20261019_*"):
+                return URI + "/20261019_12hr_01_preds/"
+            return ""
+        with self.assertRaisesRegex(DiscoveryError, "NO_MATURE_RUNS"):
+            discover_recent_synoptic(now=early, list_uri=listing)
 
 
 if __name__ == "__main__":

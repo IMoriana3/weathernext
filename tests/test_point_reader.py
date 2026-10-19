@@ -121,6 +121,21 @@ class HorizonTests(unittest.TestCase):
             select_point(fake_dataset(hours=360, omit_hour=150),
                          PointRequest(0, 0, SYNOPTIC, 360))
 
+    def test_synthetic_zarr_metadata_does_not_mask_sparse_p50_values(self):
+        ds = fake_dataset(hours=24)
+        # Coordinates and advertised variables exist, but one hourly
+        # temperature median was not materialized in the upstream run.
+        ds["temperature_2m_p50"].values[3, 1, 1] = np.nan
+        with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
+            select_point(ds, PointRequest(0.1, -0.1, SYNOPTIC, 24))
+
+    def test_missing_optional_percentile_hour_does_not_fake_a_median(self):
+        ds = fake_dataset(hours=24)
+        ds["wind_speed_10m_p90"].values[4, 1, 1] = np.nan
+        out = select_point(ds, PointRequest(0.1, -0.1, SYNOPTIC, 24))
+        self.assertIsNone(out["samples"][4]["native_values"]["wind_speed_10m_p90"])
+        self.assertEqual(out["returned_hours"], 24)
+
     def test_request_longer_than_available_is_not_mislabeled(self):
         with self.assertRaisesRegex(ValueError, "incomplete hourly forecast"):
             select_point(fake_dataset(hours=71),
