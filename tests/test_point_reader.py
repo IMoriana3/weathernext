@@ -205,9 +205,10 @@ class HorizonTests(unittest.TestCase):
                            PointRequest(0.1, -0.1, SYNOPTIC, 3),
                            progress=messages.append)
         self.assertEqual(len(out['samples']), 3)
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 3)
         self.assertTrue(messages[0].startswith('CHUNKS:'))
-        self.assertTrue(messages[1].startswith('CHUNKS_OK:'))
+        self.assertTrue(messages[1].startswith('CHUNK_LAYOUT:'))
+        self.assertTrue(messages[2].startswith('CHUNKS_OK:'))
         self.assertNotIn('280.15', str(messages))
 
     def test_missing_optional_percentile_hour_does_not_fake_a_median(self):
