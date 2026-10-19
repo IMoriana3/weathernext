@@ -71,7 +71,8 @@ EXTRA_READER_ARGS=()
 case "${WN3_FETCH_MODE:-parallel}" in
   parallel) ;;
   serial) EXTRA_READER_ARGS+=(--fetch-mode serial) ;;
-  *) echo "WN3_FETCH_MODE must be parallel or serial" >&2; exit 2 ;;
+  hourly) EXTRA_READER_ARGS+=(--fetch-mode hourly) ;;
+  *) echo "WN3_FETCH_MODE must be parallel, serial or hourly" >&2; exit 2 ;;
 esac
 case "${WN3_P50_ONLY:-0}" in
   0) ;;

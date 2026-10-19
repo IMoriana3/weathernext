@@ -242,3 +242,29 @@ WN3_FETCH_MODE=serial (else parallel). Serial mode reduces concurrent
 remote requests and identifies exactly which variable is pending; it is
 not guaranteed to be faster. Stop after the bounded timeout if it still
 does not read. No synthetic values or fallback meteorology are generated.
+
+## 24-hour P50 reading diagnostic: one-hour windows (opt in)
+
+One authorized single-lead P50 extraction completed with all four medians;
+however, a subsequent 24-hour serial field load stopped at
+CHUNK_FIELD 1/4 temperature_2m_p50 without completing. The origin of
+the delay remains UNKNOWN: Dask scheduling, remote chunk layout, missing
+objects or GCS latency are not yet distinguished.
+
+To isolate the earliest slow or unavailable lead, run an explicit 24-hour
+diagnostic with P50-only and per-hour (not per-field) Dask loads:
+
+    WN3_P50_ONLY=1 WN3_FETCH_MODE=hourly WN3_READ_TIMEOUT_SECONDS=300 bash ~/wn3.sh 41.575945 -0.798424 24
+
+The script prints CHUNK_LAYOUT (lazy lead-time chunk count) and
+CHUNK_HOUR: i/24 lead=h / CHUNK_HOUR_OK: i/24 lead=h. A null in any
+mandatory P50 stops extraction on that lead with INCOMPLETE_HOURLY_VALUES.
+No incomplete 24-hour JSON is reported as a complete forecast.
+
+The hourly-window mode may perform more remote requests and may not be
+faster than the per-field mode. It is a diagnostic, not a performance
+guarantee. It keeps source variables, units, coordinate identity, hourly
+timestamps, forecast-only provenance and upstream authorization unchanged.
+
+Until all 24 hours are complete and validated, Supabase ingestion stays
+blocked; no partial output is mislabeled as a full production forecast.

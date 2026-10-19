@@ -129,6 +129,47 @@ class HorizonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INCOMPLETE_HOURLY_VALUES"):
             select_point(ds, PointRequest(0.1, -0.1, SYNOPTIC, 24))
 
+    def test_hourly_windows_preserve_all_point_values_and_hourly_order(self):
+        request = PointRequest(0.1, -0.1, SYNOPTIC, 24, p50_only=True)
+        expected = select_point(fake_dataset(hours=24), request)
+        progress = []
+        actual = select_point(fake_dataset(hours=24), request,
+                              fetch_mode="hourly", progress=progress.append)
+        self.assertEqual(actual, expected)
+        started = [x for x in progress if x.startswith("CHUNK_HOUR:")]
+        finished = [x for x in progress if x.startswith("CHUNK_HOUR_OK:")]
+        self.assertEqual(len(started), 24)
+        self.assertEqual(len(finished), 24)
+        self.assertTrue(started[0].endswith("lead=1"))
+        self.assertTrue(finished[-1].endswith("lead=24"))
+        self.assertTrue(any(x.startswith("CHUNK_LAYOUT:") for x in progress))
+        self.assertTrue(progress[-1].startswith("CHUNKS_OK:"))
+        self.assertNotIn("280.15", str(progress))
+
+    def test_hourly_windows_fail_fast_on_first_missing_p50_hour(self):
+        ds = fake_dataset(hours=24)
+        ds["temperature_2m_p50"].values[1, 1, 1] = np.nan
+        request = PointRequest(0.1, -0.1, SYNOPTIC, 24, p50_only=True)
+        progress = []
+        with self.assertRaisesRegex(
+            ValueError, r"INCOMPLETE_HOURLY_VALUES.*lead hour 2"
+        ):
+            select_point(ds, request, fetch_mode="hourly",
+                         progress=progress.append)
+        self.assertTrue(any(x.endswith("lead=2")
+                            for x in progress if x.startswith("CHUNK_HOUR:")))
+        self.assertFalse(any(x.endswith("lead=3")
+                             for x in progress if x.startswith("CHUNK_HOUR:")))
+
+    def test_hourly_windows_keep_optional_p90_null(self):
+        ds = fake_dataset(hours=3)
+        ds["total_cloud_cover_p90"].values[1, 1, 1] = np.nan
+        request = PointRequest(0.1, -0.1, SYNOPTIC, 3)
+        out = select_point(ds, request, fetch_mode="hourly")
+        self.assertEqual(out["returned_hours"], 3)
+        self.assertIsNone(out["samples"][1]["native_values"]
+                          ["total_cloud_cover_p90"])
+
     def test_serial_mode_matches_parallel_without_new_physics(self):
         request = PointRequest(lat=0.1, lon=-0.1, prefix=SYNOPTIC, hours=3)
         parallel = select_point(fake_dataset(hours=3), request)
@@ -164,9 +205,10 @@ class HorizonTests(unittest.TestCase):
                            PointRequest(0.1, -0.1, SYNOPTIC, 3),
                            progress=messages.append)
         self.assertEqual(len(out['samples']), 3)
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 3)
         self.assertTrue(messages[0].startswith('CHUNKS:'))
-        self.assertTrue(messages[1].startswith('CHUNKS_OK:'))
+        self.assertTrue(messages[1].startswith('CHUNK_LAYOUT:'))
+        self.assertTrue(messages[2].startswith('CHUNKS_OK:'))
         self.assertNotIn('280.15', str(messages))
 
     def test_missing_optional_percentile_hour_does_not_fake_a_median(self):
