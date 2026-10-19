@@ -24,6 +24,7 @@ RUN_RE = re.compile(
 )
 MAX_DAY_LISTINGS = 7
 MAX_METADATA_CHECKS = 16
+DEFAULT_MIN_RUN_AGE_HOURS = 9  # buffer for delayed GCS statistics dissemination
 
 
 class DiscoveryError(RuntimeError):
@@ -74,6 +75,7 @@ def _run_names(listing, day):
 
 
 def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
+                             min_age_hours=DEFAULT_MIN_RUN_AGE_HOURS,
                              list_uri=_call_gcloud, progress=None):
     """Find a run with verified Zarr v3 root metadata, newest first.
 
@@ -84,6 +86,8 @@ def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
         raise ValueError(f"days must be 1..{MAX_DAY_LISTINGS}")
     if not isinstance(max_checks, int) or not 1 <= max_checks <= MAX_METADATA_CHECKS:
         raise ValueError(f"max_checks must be 1..{MAX_METADATA_CHECKS}")
+    if type(min_age_hours) is not int or not 0 <= min_age_hours <= 24:
+        raise ValueError("min_age_hours must be 0..24")
     if now is None:
         now = datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -92,6 +96,7 @@ def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
     emit = progress or (lambda msg: None)
     checks = 0
     any_candidate = False
+    any_mature_candidate = False
     for day_offset in range(days):
         day = (now - timedelta(days=day_offset)).strftime("%Y%m%d")
         # One shallow, dated prefix listing, not a recursive worldwide scan.
@@ -101,6 +106,13 @@ def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
         if candidates:
             any_candidate = True
         for run in candidates:
+            run_time = datetime.strptime(
+                run[:8] + run[9:11], "%Y%m%d%H"
+            ).replace(tzinfo=timezone.utc)
+            if run_time > now - timedelta(hours=min_age_hours):
+                emit(f"Run {run}: skipped before {min_age_hours}h publication buffer")
+                continue
+            any_mature_candidate = True
             if checks >= max_checks:
                 raise DiscoveryError(
                     f"METADATA_LIMIT: checked {checks} candidates without a valid "
@@ -115,9 +127,14 @@ def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
                 emit(f"Root metadata verified for run {run}")
                 return prefix
             emit(f"Run {run}: no readable root zarr.json; trying older run")
+    if any_candidate and not any_mature_candidate:
+        raise DiscoveryError(
+            f"NO_MATURE_RUNS: observed run folders, but none is at least "
+            f"{min_age_hours}h old; this is a publication precaution"
+        )
     if any_candidate:
         raise DiscoveryError(
-            "NO_VERIFIED_METADATA: run folders exist but no readable root "
+            "NO_VERIFIED_METADATA: mature run folders exist but no readable root 
             "zarr.json was found in the bounded search"
         )
     raise DiscoveryError(
@@ -131,10 +148,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lookback-days", type=int, default=3)
     parser.add_argument("--max-metadata-checks", type=int, default=8)
+    parser.add_argument("--min-age-hours", type=int, default=DEFAULT_MIN_RUN_AGE_HOURS,
+                        help="precautionary age buffer for statistics publication (default 9h)")
     args = parser.parse_args(argv)
     try:
         prefix = discover_recent_synoptic(
             days=args.lookback_days, max_checks=args.max_metadata_checks,
+            min_age_hours=args.min_age_hours,
             progress=lambda msg: print(msg, file=sys.stderr, flush=True),
         )
     except (DiscoveryError, ValueError) as exc:
