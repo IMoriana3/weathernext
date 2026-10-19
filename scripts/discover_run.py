@@ -134,7 +134,7 @@ def discover_recent_synoptic(*, now=None, days=3, max_checks=8,
         )
     if any_candidate:
         raise DiscoveryError(
-            "NO_VERIFIED_METADATA: mature run folders exist but no readable root 
+            "NO_VERIFIED_METADATA: mature run folders exist but no readable root "
             "zarr.json was found in the bounded search"
         )
     raise DiscoveryError(
