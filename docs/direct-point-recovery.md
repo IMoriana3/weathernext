@@ -149,3 +149,16 @@ autenticada. Un CI sintético verde no acredita la recepción de P10/P90 en GCS.
 
 Documentación: https://developmentseed.org/obstore/latest/api/exceptions/
 y https://developmentseed.org/obstore/latest/api/store/config/
+
+## Valores opcionales que llegan como null
+
+En la exportación nativa ordinaria, P10/P90 faltantes pueden conservarse como
+`null` y mostrarse expresamente como ausentes. Sin embargo, una ejecución con
+`WN3_REQUIRE_ALL_QUANTILES=1` **no reutiliza** un `null` opcional persistido
+por una prueba menos estricta. Lo elimina de la caché de forma atómica y vuelve
+a solicitar únicamente esa variable y hora.
+
+Si la respuesta continua siendo `null`, la exportación estricta falla con
+`INCOMPLETE_QUANTILES` sin almacenar valores ficticios; los demás valores
+válidos siguen en el checkpoint. Esto evita que una descarga inicial aún
+incompleta bloquee permanentemente la actualización posterior.
