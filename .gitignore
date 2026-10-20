@@ -29,3 +29,8 @@ __pycache__/
 # Native forecasts and prepared Supabase row exports
 *supabase-rows.json
 weathernext3-*.json
+
+# Private resumable point staging: never publish native data
+*.checkpoint.json
+*.checkpoint.lock
+.wn3-*.tmp

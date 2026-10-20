@@ -109,12 +109,14 @@ def _nearest_circular_longitude(dataset, longitude):
 
 
 def select_point(dataset, request: PointRequest, *, progress=None,
-                 fetch_mode="parallel"):
+                 fetch_mode="parallel", checkpoint_dir=None):
     """Select variables, one location and hourly leads BEFORE .load()."""
     import numpy as np
     emit = progress or (lambda message: None)
-    if fetch_mode not in ("parallel", "serial", "hourly"):
-        raise ValueError("fetch_mode must be parallel, serial or hourly")
+    if fetch_mode not in ("parallel", "serial", "hourly", "direct"):
+        raise ValueError("fetch_mode must be parallel, serial, hourly or direct")
+    if checkpoint_dir is not None and fetch_mode != "direct":
+        raise ValueError("checkpoints require direct mode")
 
     axes = ("lat_0p1", "lon_0p1", "lead_time", "init_time")
     missing_axes = [name for name in axes if name not in dataset]
@@ -165,7 +167,10 @@ def select_point(dataset, request: PointRequest, *, progress=None,
         lead_chunks = subset[present_fields[0]].chunksizes.get("lead_time", ())
         emit(f"CHUNK_LAYOUT: first field lead_time uses "
              f"{len(lead_chunks)} lazy chunk(s)")
-    if fetch_mode == "hourly":
+    if fetch_mode == "direct":
+        from point_checkpoint import load_direct
+        subset = load_direct(subset, request, emit, checkpoint_dir=checkpoint_dir)
+    elif fetch_mode == "hourly":
         # Independently materialize one requested lead hour at a time. This
         # restricts each active Dask graph, exposes the first slow lead and
         # fails at the earliest unavailable mandatory median. It may cost
@@ -273,7 +278,7 @@ def select_point(dataset, request: PointRequest, *, progress=None,
 
 
 def read_gcs_point(request: PointRequest, *, progress=None,
-                   fetch_mode="parallel"):
+                   fetch_mode="parallel", checkpoint_dir=None):
     """GCS with authorized ambient identity; anonymous calls are refused."""
     emit = progress or (lambda message: None)
     if os.environ.get("GOOGLE_SKIP_SIGNATURE", "").lower() == "true":
@@ -283,12 +288,19 @@ def read_gcs_point(request: PointRequest, *, progress=None,
     from zarr.storage import ObjectStore
 
     emit("METADATA: connecting to authorized GCS Zarr store")
-    store = GCSStore(bucket=BUCKET, prefix=request.prefix)
-    dataset = xr.open_zarr(ObjectStore(store), chunks={})
+    if checkpoint_dir is not None and fetch_mode != "direct":
+        raise ValueError("checkpoints require direct mode")
+    options = {}
+    if fetch_mode == "direct":
+        options = {"client_options": {"timeout": "30s", "connect_timeout": "10s"},
+                   "retry_config": {"max_retries": 2, "retry_timeout": timedelta(seconds=60)}}
+    store = GCSStore(bucket=BUCKET, prefix=request.prefix, **options)
+    dataset = xr.open_zarr(ObjectStore(store),
+                           chunks=None if fetch_mode == "direct" else {})
     emit("METADATA_OK: opening finished; selecting site and requested hours")
     try:
         return select_point(dataset, request, progress=progress,
-                            fetch_mode=fetch_mode)
+                            fetch_mode=fetch_mode, checkpoint_dir=checkpoint_dir)
     finally:
         dataset.close()
 
@@ -302,10 +314,12 @@ def _parse_args(argv=None):
                         help="72h default; max 360h synoptic or 48h interim")
     parser.add_argument("--p50-only", action="store_true",
                         help="Read only four P50 variables instead of P10/P50/P90")
-    parser.add_argument("--fetch-mode", choices=("parallel", "serial", "hourly"),
+    parser.add_argument("--fetch-mode", choices=("parallel", "serial", "hourly", "direct"),
                         default="parallel",
                         help=("serial: one variable at a time; hourly: one lead hour "
-                              "at a time, both single-threaded; diagnostic only"))
+                              "at a time; direct: no Dask, bounded point reads and optional checkpoints"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=None,
+                        help="Private resumable staging for direct mode only")
     parser.add_argument("--output", type=Path, default=None,
                         help="Write native samples locally (never to stdout)")
     return parser.parse_args(argv)
@@ -319,13 +333,13 @@ def main(argv=None):
         result = read_gcs_point(
             request,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
-            fetch_mode=args.fetch_mode,
+            fetch_mode=args.fetch_mode, checkpoint_dir=args.checkpoint_dir,
         )
         if args.output is not None:
             path = args.output.expanduser().resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fp:
-                json.dump(result, fp, ensure_ascii=False, indent=2, allow_nan=False)
+            from point_checkpoint import atomic_json
+            atomic_json(path, result)
         print("OK: authorized, bounded point read")
         print(f"Horizon: {result['returned_hours']}h; "
               f"fields: {len(result['available_fields'])}/"

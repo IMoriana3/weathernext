@@ -72,7 +72,13 @@ case "${WN3_FETCH_MODE:-parallel}" in
   parallel) ;;
   serial) EXTRA_READER_ARGS+=(--fetch-mode serial) ;;
   hourly) EXTRA_READER_ARGS+=(--fetch-mode hourly) ;;
-  *) echo "WN3_FETCH_MODE must be parallel, serial or hourly" >&2; exit 2 ;;
+  direct)
+    CHECKPOINT_DIR="${WN3_CHECKPOINT_DIR:-$HOME/.cache/wn3-point-checkpoints}"
+    EXTRA_READER_ARGS+=(--fetch-mode direct --checkpoint-dir "$CHECKPOINT_DIR")
+    echo "Private resumable staging: $CHECKPOINT_DIR (not a complete forecast)"
+    echo "Repeat the SAME run prefix to resume; completed fields are not downloaded again."
+    ;;
+  *) echo "WN3_FETCH_MODE must be parallel, serial, hourly or direct" >&2; exit 2 ;;
 esac
 case "${WN3_P50_ONLY:-0}" in
   0) ;;
@@ -92,10 +98,14 @@ else
   STATUS=$?
   if (( STATUS == 124 || STATUS == 137 )); then
     echo "READ_TIMEOUT: remote GCS metadata or chunks did not complete; no forecast was exported." >&2
-    echo "Retry with an older verified run or diagnose the stage shown above." >&2
+    if [[ "${WN3_FETCH_MODE:-parallel}" == "direct" ]]; then
+      echo "Validated staging has been preserved. Resume this exact run: $FOUND" >&2
+    else
+      echo "Retry with an older verified run or diagnose the stage shown above." >&2
+    fi
   fi
   exit "$STATUS"
 fi
 echo "FILE READY: $OUTPUT"
-echo "Use Cloud Shell\'s Download file command to save it to your computer."
+echo "Use Cloud Shell's Download file command to save it to your computer."
 echo "Do not commit the generated file to a public repository."
