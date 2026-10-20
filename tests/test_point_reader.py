@@ -11,6 +11,7 @@ from point_reader import (
     BASE, DEFAULT_HOURS, FIELDS, INTERIM_MAX_HOURS, MAX_HOURS,
     MAX_VALUES_PER_POINT, P50_FIELDS, PointRequest, QUANTILES,
     SYNOPTIC_MAX_HOURS, read_gcs_point, run_limits, select_point,
+    require_complete_quantiles,
 )
 
 SYNOPTIC = BASE + "20260101_00hr_01_preds/predictions.zarr"
@@ -240,6 +241,51 @@ class HorizonTests(unittest.TestCase):
                 PointRequest(**{**{"lat": 0, "lon": 0, "prefix": SYNOPTIC},
                                 **overrides})
 
+
+class FullQuantileQualityTests(unittest.TestCase):
+    def test_all_12_native_hourly_percentiles_are_required_when_certifying(self):
+        source = fake_dataset(hours=24)
+        run = PointRequest(0.1, -0.1, SYNOPTIC, 24)
+        complete = select_point(source, run)
+        self.assertIsNone(require_complete_quantiles(complete))
+
+        complete["samples"][11]["native_values"]["total_cloud_cover_p90"] = None
+        with self.assertRaisesRegex(
+            ValueError, r"INCOMPLETE_QUANTILES.*lead hour 12"
+        ):
+            require_complete_quantiles(complete)
+
+    def test_required_full_quantiles_reject_p50_only_or_absent_optional_fields(self):
+        p50_only = select_point(
+            fake_dataset(hours=3),
+            PointRequest(0.1, -0.1, SYNOPTIC, 3, p50_only=True),
+        )
+        with self.assertRaisesRegex(ValueError, "QUANTILE_REQUEST"):
+            require_complete_quantiles(p50_only)
+
+        missing = select_point(
+            fake_dataset(hours=3, missing=("total_cloud_cover_p10",)),
+            PointRequest(0.1, -0.1, SYNOPTIC, 3),
+        )
+        with self.assertRaisesRegex(ValueError, "INCOMPLETE_QUANTILES"):
+            require_complete_quantiles(missing)
+
+    def test_strict_cli_rejects_p50_only_before_any_network_request(self):
+        import tempfile
+        from pathlib import Path
+        from point_reader import main
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "forecast.json"
+            with patch("point_reader.read_gcs_point") as network:
+                code = main([
+                    "--lat", "0.1", "--lon", "-0.1",
+                    "--run-prefix", SYNOPTIC, "--hours", "3",
+                    "--p50-only", "--require-all-quantiles",
+                    "--output", str(output),
+                ])
+            self.assertEqual(code, 1)
+            network.assert_not_called()
+            self.assertFalse(output.exists())
 
 class PercentileTests(unittest.TestCase):
     def test_all_precomputed_percentiles_are_preserved_as_native_values(self):
