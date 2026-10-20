@@ -274,7 +274,7 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None):
                 if not missing:
                     emit(f"CACHE_HOUR_OK: {lead}/{request.hours}")
                     continue
-                emit(f"DIRECT_HOUR: {lead}/{request.hours}; {len(missing)} fields missing")
+                emit(f"DIRECT_HOUR: {lead}/{request.hours}; {len(missing)} values pending download")
                 futures = {executor.submit(read_scalar, f, index): f for f in missing}
                 for future in as_completed(futures):
                     field = futures[future]
