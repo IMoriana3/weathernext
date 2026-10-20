@@ -173,6 +173,60 @@ def _identity(subset, request):
     }
 
 
+
+def _seed_matching_p50_checkpoint(target, required_fields, emit):
+    """Reuse a *verified* median-only checkpoint for a superset field request.
+
+    Only fields change. Run, exact site, horizon, grid, initialization,
+    units and each shared variable's array shape/dtype must match exactly.
+    The old checkpoint remains unchanged and is read under its own lock.
+    """
+    if target.path is None:
+        return 0
+    wanted = list(required_fields)
+    identity = target.identity
+    if identity["requested_fields"] == wanted:
+        return 0  # already in P50-only mode
+    if not set(wanted).issubset(identity["available_fields"]):
+        return 0
+
+    source_identity = {
+        **identity,
+        "requested_fields": wanted,
+        "available_fields": wanted,
+        "raw_units": {field: identity["raw_units"][field]
+                      for field in wanted},
+        "array_layout": {field: identity["array_layout"][field]
+                         for field in wanted},
+    }
+    source = PointCheckpoint(target.path.parent, source_identity, required_fields)
+    if not os.path.lexists(source.path):
+        return 0
+
+    with source:  # validates SHA256, exact identity, every lead and value
+        snapshot = {lead: dict(row) for lead, row in source.values.items()}
+
+    # Fail closed BEFORE importing anything if two validated checkpoints
+    # claim different values for the same initialized run and grid cell.
+    for lead, fields in snapshot.items():
+        current = target.values.get(lead, {})
+        for field, value in fields.items():
+            if field in current and current[field] != value:
+                raise ValueError(
+                    "CHECKPOINT_CONFLICT: different P50 values for the same "
+                    "run/site/hour; refusing to combine snapshots"
+                )
+
+    imported = 0
+    for lead in sorted(snapshot, key=int):
+        for field, value in snapshot[lead].items():
+            if field not in target.values.get(lead, {}):
+                target.put(int(lead), field, value)
+                imported += 1
+    emit(f"REUSE_P50: {imported} validated median values copied from "
+         f"compatible private checkpoint")
+    return imported
+
 def load_direct(subset, request, emit, *, checkpoint_dir=None):
     """Materialize only selected point scalars, at most four reads in flight.
 
@@ -208,7 +262,10 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None):
 
     with PointCheckpoint(checkpoint_dir, _identity(subset, request), P50_FIELDS) as cp:
         emit(f"DIRECT: no Dask; at most {WORKERS} point reads in flight")
-        emit(f"RESUME: {cp.completed_hours()}/{request.hours} complete P50 hours cached")
+        _seed_matching_p50_checkpoint(cp, P50_FIELDS, emit)
+        saved = sum(len(row) for row in cp.values.values())
+        emit(f"RESUME: {cp.completed_hours()}/{request.hours} P50 hours cached; "
+             f"{saved}/{request.hours * len(fields)} source scalars retained")
         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
             for index in range(request.hours):
                 lead = index + 1
