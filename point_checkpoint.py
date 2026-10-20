@@ -1,0 +1,236 @@
+"""Private, resumable point I/O; no forecast physics or database writes.
+
+Checkpoint files are staging, NOT transport-v2 forecasts. Only the canonical
+point_reader.select_point builds a complete, validated export. No Dask arrays
+are accepted by this loader. Xarray must open the store with chunks=None.
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import AbstractContextManager
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import stat
+import tempfile
+
+CHECKPOINT_SCHEMA = "weathernext3-point-checkpoint-v1"
+MAX_CHECKPOINT_BYTES = 1024 * 1024
+WORKERS = 4
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _digest(value):
+    return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def atomic_json(path, value):
+    """Commit private JSON atomically; interruption leaves the previous file."""
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".wn3-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(_canonical(value))
+            out.write(b"\n")
+            out.flush()
+            os.fsync(out.fileno())
+        # mkstemp already creates mode 0600. Replace, never follow, a symlink.
+        os.replace(temporary, path)
+        dirfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("CHECKPOINT_INVALID: duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _bad_constant(value):
+    raise ValueError("CHECKPOINT_INVALID: non-standard numeric literal")
+
+
+class PointCheckpoint(AbstractContextManager):
+    """One writer per request; validate identity and content before reuse."""
+    def __init__(self, directory, identity, required_fields):
+        self.identity = identity
+        self.required = set(required_fields)
+        self.values = {}
+        self.path = None if directory is None else (
+            Path(directory).expanduser() / (_digest(identity) + ".checkpoint.json")
+        )
+        self._lock = None
+
+    def __enter__(self):
+        if self.path is None:
+            return self
+        import fcntl  # Cloud Shell / Linux; do not silently omit locking.
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = self.path.with_suffix(".lock")
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        self._lock = os.fdopen(fd, "a")
+        try:
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._read()
+        except BaseException:
+            self._lock.close()
+            self._lock = None
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
+        return False
+
+    def _read(self):
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return
+        with os.fdopen(fd, "rb") as src:
+            info = os.fstat(src.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CHECKPOINT_BYTES
+                    or info.st_mode & 0o077):
+                raise ValueError("CHECKPOINT_INVALID: size, type or private permissions")
+            obj = json.load(src, object_pairs_hook=_unique_pairs,
+                            parse_constant=_bad_constant)
+        if not isinstance(obj, dict) or set(obj) != {"body", "sha256"}:
+            raise ValueError("CHECKPOINT_INVALID: invalid envelope")
+        body = obj["body"]
+        if not isinstance(body, dict) or set(body) != {"schema", "identity", "values"}:
+            raise ValueError("CHECKPOINT_INVALID: invalid body")
+        if obj["sha256"] != _digest(body):
+            raise ValueError("CHECKPOINT_INVALID: checksum mismatch")
+        if body["schema"] != CHECKPOINT_SCHEMA or body["identity"] != self.identity:
+            raise ValueError("CHECKPOINT_INVALID: different run, site, fields or metadata")
+        values = body["values"]
+        if not isinstance(values, dict):
+            raise ValueError("CHECKPOINT_INVALID: values must be an object")
+        valid_leads = {str(i) for i in range(1, self.identity["hours"] + 1)}
+        for lead, fields in values.items():
+            if lead not in valid_leads or not isinstance(fields, dict):
+                raise ValueError("CHECKPOINT_INVALID: invalid lead")
+            for field, value in fields.items():
+                self._validate(field, value)
+        self.values = values
+
+    def _validate(self, field, value):
+        if field not in self.identity["available_fields"]:
+            raise ValueError("CHECKPOINT_INVALID: unexpected field")
+        if value is None:
+            if field in self.required:
+                raise ValueError("INCOMPLETE_HOURLY_VALUES: required P50 cannot be cached null")
+        elif type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("CHECKPOINT_INVALID: non-finite native value")
+
+    def put(self, lead, field, value):
+        if type(lead) is not int or not 1 <= lead <= self.identity["hours"]:
+            raise ValueError("CHECKPOINT_INVALID: invalid lead")
+        self._validate(field, value)
+        self.values.setdefault(str(lead), {})[field] = value
+        if self.path is not None:
+            body = {"schema": CHECKPOINT_SCHEMA, "identity": self.identity,
+                    "values": self.values}
+            atomic_json(self.path, {"body": body, "sha256": _digest(body)})
+
+    def completed_hours(self):
+        return sum(self.required.issubset(row) for row in self.values.values())
+
+
+def _identity(subset, request):
+    return {
+        "run_prefix": request.prefix,
+        "lat": float(request.lat), "lon": float(request.lon),
+        "hours": request.hours, "requested_fields": list(request.fields),
+        "available_fields": list(subset.data_vars),
+        "selected_lat": float(subset["lat_0p1"].values),
+        "selected_lon_360": float(subset["lon_0p1"].values),
+        "init_time": str(subset["init_time"].values),
+        "raw_units": {f: str(subset[f].attrs.get("units", "unspecified"))
+                      for f in subset.data_vars},
+        "array_layout": {f: {"dims": list(subset[f].dims),
+                             "shape": list(subset[f].shape),
+                             "dtype": str(subset[f].dtype)}
+                         for f in subset.data_vars},
+    }
+
+
+def load_direct(subset, request, emit, *, checkpoint_dir=None):
+    """Materialize only selected point scalars, at most four reads in flight.
+
+    Coordinates/time selection and final JSON validation remain in the
+    canonical reader. Completed scalars persist even if a later read fails.
+    All coordinates/metadata are part of checkpoint identity; never mix runs.
+    """
+    import numpy as np
+    import xarray as xr
+    from point_reader import P50_FIELDS
+
+    fields = tuple(subset.data_vars)
+    for field in fields:
+        array = subset[field]
+        if array.chunks is not None:
+            raise ValueError("DIRECT_REQUIRES_NO_DASK: open the store with chunks=None")
+        if "lead_time" not in array.dims or array.size != request.hours:
+            raise ValueError("unexpected extra data dimensions in direct point read")
+
+    def read_scalar(field, index):
+        # This indexes the lazy backend BEFORE materializing a numpy scalar.
+        data = np.asarray(subset[field].isel(lead_time=index).values)
+        if data.size != 1:
+            raise ValueError("unexpected extra data dimensions in direct point read")
+        value = float(data.item())
+        if not math.isfinite(value):
+            if field in P50_FIELDS:
+                raise ValueError(
+                    f"INCOMPLETE_HOURLY_VALUES: {field} at lead {index + 1}"
+                )
+            value = None
+        return value
+
+    with PointCheckpoint(checkpoint_dir, _identity(subset, request), P50_FIELDS) as cp:
+        emit(f"DIRECT: no Dask; at most {WORKERS} point reads in flight")
+        emit(f"RESUME: {cp.completed_hours()}/{request.hours} complete P50 hours cached")
+        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+            for index in range(request.hours):
+                lead = index + 1
+                saved = cp.values.get(str(lead), {})
+                missing = [field for field in fields if field not in saved]
+                if not missing:
+                    emit(f"CACHE_HOUR_OK: {lead}/{request.hours}")
+                    continue
+                emit(f"DIRECT_HOUR: {lead}/{request.hours}; {len(missing)} fields missing")
+                futures = {executor.submit(read_scalar, f, index): f for f in missing}
+                for future in as_completed(futures):
+                    field = futures[future]
+                    cp.put(lead, field, future.result())
+                # This marker is emitted only AFTER durable writes, if enabled.
+                emit(f"DIRECT_HOUR_OK: {lead}/{request.hours}")
+        # Replace only selected small arrays. Do not recompute/copy global data.
+        result = xr.Dataset(coords=subset.coords, attrs=subset.attrs)
+        for field in fields:
+            source = subset[field]
+            data = np.array([
+                np.nan if cp.values[str(lead)][field] is None else cp.values[str(lead)][field]
+                for lead in range(1, request.hours + 1)
+            ], dtype=float).reshape(source.shape)
+            result[field] = xr.Variable(source.dims, data, attrs=source.attrs)
+        return result
