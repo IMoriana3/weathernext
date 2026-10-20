@@ -79,6 +79,83 @@ class DirectCheckpointTests(unittest.TestCase):
         self.assertEqual(actual, select_point(fake_dataset(hours=360), req))
         self.assertEqual(len(log), 360*12)
 
+    def test_full_quantiles_reuse_all_24_hours_of_p50_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p50_dataset, p50_reads = lazy_dataset(hours=24)
+            select_point(p50_dataset, request(), fetch_mode='direct',
+                         checkpoint_dir=directory)
+            self.assertEqual(len(p50_reads), 24 * 4)
+
+            full_dataset, native_reads = lazy_dataset(hours=24)
+            messages = []
+            actual = select_point(
+                full_dataset, request(all_fields=True),
+                fetch_mode='direct', checkpoint_dir=directory,
+                progress=messages.append,
+            )
+            self.assertEqual(
+                actual, select_point(fake_dataset(hours=24), request(all_fields=True))
+            )
+            self.assertEqual(len(native_reads), 24 * 8)
+            self.assertTrue(all(not field.endswith('_p50')
+                                for field, _, _ in native_reads))
+            self.assertTrue(any("REUSE_P50: 96 validated" in msg
+                                for msg in messages))
+            self.assertTrue(any("96/288 source scalars retained" in msg
+                                for msg in messages))
+            self.assertEqual(len(list(Path(directory).glob('*.checkpoint.json'))), 2)
+
+            repeat, calls = lazy_dataset(hours=24)
+            self.assertEqual(
+                select_point(repeat, request(all_fields=True),
+                             fetch_mode='direct', checkpoint_dir=directory),
+                actual,
+            )
+            self.assertEqual(calls, [])
+
+    def test_seed_does_not_cross_sites_or_nonmatching_units(self):
+        with tempfile.TemporaryDirectory() as directory:
+            select_point(lazy_dataset(hours=3)[0], request(3),
+                         fetch_mode='direct', checkpoint_dir=directory)
+
+            changed_site, reads = lazy_dataset(hours=3)
+            select_point(changed_site, request(3, all_fields=True, lon=-.099),
+                         fetch_mode='direct', checkpoint_dir=directory)
+            self.assertEqual(len(reads), 3 * 12)
+
+        with tempfile.TemporaryDirectory() as directory:
+            select_point(lazy_dataset(hours=3)[0], request(3),
+                         fetch_mode='direct', checkpoint_dir=directory)
+            altered = fake_dataset(hours=3)
+            altered["wind_speed_10m_p50"].attrs["units"] = "different-native-unit"
+            full, reads = lazy_dataset(hours=3, source=altered)
+            select_point(full, request(3, all_fields=True),
+                         fetch_mode='direct', checkpoint_dir=directory)
+            self.assertEqual(len(reads), 3 * 12)
+
+    def test_conflicting_matching_checkpoint_fails_before_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            select_point(lazy_dataset(hours=3)[0], request(3, all_fields=True),
+                         fetch_mode='direct', checkpoint_dir=directory)
+            select_point(lazy_dataset(hours=3)[0], request(3),
+                         fetch_mode='direct', checkpoint_dir=directory)
+
+            for path in Path(directory).glob("*.checkpoint.json"):
+                document = json.loads(path.read_text(encoding="utf-8"))
+                if len(document["body"]["identity"]["requested_fields"]) == 12:
+                    document["body"]["values"]["1"]["temperature_2m_p50"] += 1.0
+                    document["sha256"] = _digest(document["body"])
+                    atomic_json(path, document)
+                    break
+            else:
+                self.fail("full-field checkpoint was not found")
+
+            ds, reads = lazy_dataset(hours=3)
+            with self.assertRaisesRegex(ValueError, "CHECKPOINT_CONFLICT"):
+                select_point(ds, request(3, all_fields=True),
+                             fetch_mode='direct', checkpoint_dir=directory)
+            self.assertEqual(reads, [])
+
     def test_11_hours_survive_timeout_and_resume_without_rereading_them(self):
         req = request()
         with tempfile.TemporaryDirectory() as directory:
