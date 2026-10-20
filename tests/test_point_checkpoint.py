@@ -18,7 +18,8 @@ from xarray.core import indexing
 
 from point_checkpoint import (PointCheckpoint, _identity, atomic_json, _digest,
                               classify_point_read_error)
-from point_reader import PointRequest, P50_FIELDS, select_point, main, read_gcs_point
+from point_reader import (PointRequest, P50_FIELDS, select_point, main,
+                          read_gcs_point, require_complete_quantiles)
 from test_point_reader import fake_dataset, SYNOPTIC
 
 
@@ -293,6 +294,49 @@ class DirectCheckpointTests(unittest.TestCase):
             cache_file, = Path(directory).glob("*.checkpoint.json")
             cache = json.loads(cache_file.read_text())["body"]["values"]
             self.assertEqual(len(cache["1"]), 11)
+
+    def test_strict_quantiles_recheck_optional_null_cached_in_previous_run(self):
+        req = request(3, all_fields=True)
+        initial = fake_dataset(hours=3)
+        initial["total_cloud_cover_p90"].values[0, 1, 1] = np.nan
+        ds, _ = lazy_dataset(hours=3, source=initial)
+        with tempfile.TemporaryDirectory() as directory:
+            # Non-strict transport explicitly permits null optional values.
+            partial = select_point(ds, req, fetch_mode="direct",
+                                   checkpoint_dir=directory)
+            self.assertIsNone(partial["samples"][0]["native_values"]
+                              ["total_cloud_cover_p90"])
+            replacement, reads = lazy_dataset(hours=3)
+            progress = []
+            complete = select_point(
+                replacement, req, fetch_mode="direct",
+                checkpoint_dir=directory, strict_quantiles=True,
+                progress=progress.append,
+            )
+            self.assertEqual(reads, [
+                ("total_cloud_cover_p90", 1, (0, 1, 1))
+            ])
+            self.assertTrue(any("STRICT_RECHECK: 1" in line
+                                for line in progress))
+            self.assertIsNone(require_complete_quantiles(complete))
+
+    def test_strict_quantiles_reject_null_without_caching_it(self):
+        req = request(3, all_fields=True)
+        source = fake_dataset(hours=3)
+        source["total_cloud_cover_p90"].values[1, 1, 1] = np.nan
+        ds, _ = lazy_dataset(hours=3, source=source)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ValueError, "INCOMPLETE_QUANTILES"
+            ):
+                select_point(ds, req, fetch_mode="direct",
+                             strict_quantiles=True,
+                             checkpoint_dir=directory)
+            checkpoint, = Path(directory).glob("*.checkpoint.json")
+            cache = json.loads(checkpoint.read_text())["body"]["values"]
+            self.assertNotIn("total_cloud_cover_p90", cache.get("2", {}))
+            # Existing successful values are kept; no fake percentile written.
+            self.assertTrue(any(cache.values()))
 
     def test_11_hours_survive_timeout_and_resume_without_rereading_them(self):
         req = request()
