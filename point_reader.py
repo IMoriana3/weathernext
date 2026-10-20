@@ -277,6 +277,32 @@ def select_point(dataset, request: PointRequest, *, progress=None,
     }
 
 
+
+def require_complete_quantiles(result: dict) -> None:
+    """Optional certification gate for *all* 12 hourly native percentiles.
+
+    The general transport still explicitly supports absent optional P10/P90
+    fields; this gate is opt-in when preparing a fully probabilistic batch.
+    """
+    if result.get("requested_fields") != list(FIELDS):
+        raise ValueError(
+            "QUANTILE_REQUEST: full P10/P50/P90 certification requires "
+            "all 12 native source fields, not a P50-only extraction"
+        )
+    if (result.get("available_fields") != list(FIELDS)
+            or result.get("missing_upstream_fields")):
+        raise ValueError(
+            "INCOMPLETE_QUANTILES: one or more upstream percentile fields "
+            "are absent, so a full probabilistic series cannot be certified"
+        )
+    for sample in result.get("samples", []):
+        for field in FIELDS:
+            if sample["native_values"].get(field) is None:
+                raise ValueError(
+                    "INCOMPLETE_QUANTILES: native "
+                    f"{field} missing at lead hour {sample['lead_hour']}"
+                )
+
 def read_gcs_point(request: PointRequest, *, progress=None,
                    fetch_mode="parallel", checkpoint_dir=None):
     """GCS with authorized ambient identity; anonymous calls are refused."""
@@ -320,6 +346,8 @@ def _parse_args(argv=None):
                               "at a time; direct: no Dask, bounded point reads and optional checkpoints"))
     parser.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Private resumable staging for direct mode only")
+    parser.add_argument("--require-all-quantiles", action="store_true",
+                        help="Reject output unless all P10/P50/P90 values exist at every hour")
     parser.add_argument("--output", type=Path, default=None,
                         help="Write native samples locally (never to stdout)")
     return parser.parse_args(argv)
@@ -330,11 +358,17 @@ def main(argv=None):
     try:
         request = PointRequest(args.lat, args.lon, args.run_prefix,
                                args.hours, args.p50_only)
+        if args.require_all_quantiles and args.p50_only:
+            raise ValueError(
+                "QUANTILE_REQUEST: cannot require all quantiles with --p50-only"
+            )
         result = read_gcs_point(
             request,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
             fetch_mode=args.fetch_mode, checkpoint_dir=args.checkpoint_dir,
         )
+        if args.require_all_quantiles:
+            require_complete_quantiles(result)
         if args.output is not None:
             path = args.output.expanduser().resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
