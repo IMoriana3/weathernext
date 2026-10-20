@@ -109,7 +109,8 @@ def _nearest_circular_longitude(dataset, longitude):
 
 
 def select_point(dataset, request: PointRequest, *, progress=None,
-                 fetch_mode="parallel", checkpoint_dir=None):
+                 fetch_mode="parallel", checkpoint_dir=None,
+                 strict_quantiles=False):
     """Select variables, one location and hourly leads BEFORE .load()."""
     import numpy as np
     emit = progress or (lambda message: None)
@@ -117,6 +118,8 @@ def select_point(dataset, request: PointRequest, *, progress=None,
         raise ValueError("fetch_mode must be parallel, serial, hourly or direct")
     if checkpoint_dir is not None and fetch_mode != "direct":
         raise ValueError("checkpoints require direct mode")
+    if strict_quantiles and request.p50_only:
+        raise ValueError("full quantile validation rejects P50-only requests")
 
     axes = ("lat_0p1", "lon_0p1", "lead_time", "init_time")
     missing_axes = [name for name in axes if name not in dataset]
@@ -169,7 +172,8 @@ def select_point(dataset, request: PointRequest, *, progress=None,
              f"{len(lead_chunks)} lazy chunk(s)")
     if fetch_mode == "direct":
         from point_checkpoint import load_direct
-        subset = load_direct(subset, request, emit, checkpoint_dir=checkpoint_dir)
+        subset = load_direct(subset, request, emit, checkpoint_dir=checkpoint_dir,
+                             strict_quantiles=strict_quantiles)
     elif fetch_mode == "hourly":
         # Independently materialize one requested lead hour at a time. This
         # restricts each active Dask graph, exposes the first slow lead and
@@ -304,7 +308,8 @@ def require_complete_quantiles(result: dict) -> None:
                 )
 
 def read_gcs_point(request: PointRequest, *, progress=None,
-                   fetch_mode="parallel", checkpoint_dir=None):
+                   fetch_mode="parallel", checkpoint_dir=None,
+                   strict_quantiles=False):
     """GCS with authorized ambient identity; anonymous calls are refused."""
     emit = progress or (lambda message: None)
     if os.environ.get("GOOGLE_SKIP_SIGNATURE", "").lower() == "true":
@@ -326,7 +331,8 @@ def read_gcs_point(request: PointRequest, *, progress=None,
     emit("METADATA_OK: opening finished; selecting site and requested hours")
     try:
         return select_point(dataset, request, progress=progress,
-                            fetch_mode=fetch_mode, checkpoint_dir=checkpoint_dir)
+                            fetch_mode=fetch_mode, checkpoint_dir=checkpoint_dir,
+                            strict_quantiles=strict_quantiles)
     finally:
         dataset.close()
 
@@ -366,6 +372,7 @@ def main(argv=None):
             request,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
             fetch_mode=args.fetch_mode, checkpoint_dir=args.checkpoint_dir,
+            strict_quantiles=args.require_all_quantiles,
         )
         if args.require_all_quantiles:
             require_complete_quantiles(result)
