@@ -86,6 +86,18 @@ case "${WN3_P50_ONLY:-0}" in
   *) echo "WN3_P50_ONLY must be 0 or 1" >&2; exit 2 ;;
 esac
 
+# Explicit full-quantile certification when extending a P50-only run.
+case "${WN3_REQUIRE_ALL_QUANTILES:-0}" in
+  0) ;;
+  1)
+    if [[ "${WN3_P50_ONLY:-0}" == "1" ]]; then
+      echo "Cannot require all P10/P50/P90 fields in P50-only mode" >&2
+      exit 2
+    fi
+    EXTRA_READER_ARGS+=(--require-all-quantiles)
+    ;;
+  *) echo "WN3_REQUIRE_ALL_QUANTILES must be 0 or 1" >&2; exit 2 ;;
+esac
 OUTPUT="$HOME/weathernext3-$(date -u +%Y%m%dT%H%M%SZ).json"
 echo "[4/4] Reading one grid cell with $HOURS hours (at most 12 native fields; complete P50 required)..."
 echo "Diagnostic: metadata/chunk stages; bounded to ${READ_TIMEOUT_SECONDS}s without publishing partial data."
