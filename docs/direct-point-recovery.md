@@ -87,3 +87,34 @@ this work production-validated based on offline or CI success alone.
 - Xarray chunks=None: https://docs.xarray.dev/en/stable/generated/xarray.open_zarr.html
 - Google statistics GCS: https://developers.google.com/weathernext/guides/gcs
 - Obstore timeouts and retry policy: https://developmentseed.org/obstore/latest/api/store/config/
+
+## Reutilizar P50 ya descargado al completar P10/P90
+
+El primer pronóstico real de El Burgo I del ciclo 20261019_06 UTC
+se descargó con 24 horas y cuatro P50; esos cuatro campos están conservados
+en su checkpoint privado de Cloud Shell. Una petición con los doce
+campos, en modo direct y **exactamente el mismo ciclo, sitio y horizonte**,
+reutiliza los valores P50 que superen el control de identidad.
+
+El origen compatible debe coincidir en: prefijo del run, coordenadas
+solicitadas y celda seleccionada, 24 horas, init_time, unidades y
+dtype/dimensiones de cada campo común. Se bloquean discrepancias entre
+dos snapshots de la misma ejecución; no se reescriben valores divergentes.
+Este proceso NO reutiliza automáticamente datos entre fechas o horizontes
+diferentes. Si no existe checkpoint P50 compatible se descargan de origen.
+
+Comando manual (Cloud Shell autenticado; mismo ciclo histórico):
+
+    WN3_FETCH_MODE=direct WN3_REQUIRE_ALL_QUANTILES=1 WN3_READ_TIMEOUT_SECONDS=900 \
+      bash ~/wn3.sh 41.575945 -0.798424 24 \
+      weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr
+
+La opción WN3_REQUIRE_ALL_QUANTILES=1 exige que los doce valores
+P10/P50/P90 sean finitos en cada hora. No permite declarar completo un
+pronóstico en el que solo haya P50, ni rellena valores opcionales ausentes.
+Ante timeout, los nuevos campos ya descargados quedan retenidos para
+reanudar el mismo ciclo. Checkpoints no se suben a GitHub ni se importan a
+Supabase; solo un JSON final completo validado puede pasar al adaptador.
+
+El objetivo posterior de 72/360 horas requiere una extracción/certificación
+independiente y no queda verificado por esta prueba de 24 horas.
