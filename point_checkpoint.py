@@ -291,6 +291,107 @@ def _seed_matching_p50_checkpoint(target, required_fields, emit):
          f"compatible private checkpoint")
     return imported
 
+
+def _smaller_horizon_identity(identity, source_hours, requested):
+    """Derive only an exact, deterministic existing checkpoint identity.
+
+    A selected point is indexed from lead 1 and has no other varying axis.
+    Never discover arbitrary JSON files or relax coordinate/source checks.
+    """
+    if not (0 < source_hours < identity["hours"]):
+        raise ValueError("checkpoint source horizon must be shorter")
+    wanted = list(requested)
+    if not set(wanted).issubset(identity["requested_fields"]):
+        raise ValueError("checkpoint source fields must be a subset")
+
+    available = [name for name in identity["available_fields"] if name in wanted]
+    layout = {}
+    for field in available:
+        source = identity["array_layout"][field]
+        dims = list(source["dims"])
+        shape = list(source["shape"])
+        if dims.count("lead_time") != 1:
+            raise ValueError("checkpoint layout must have exactly one lead_time axis")
+        idx = dims.index("lead_time")
+        if shape[idx] != identity["hours"]:
+            raise ValueError("checkpoint source lead_time shape mismatch")
+        if math.prod(shape) != identity["hours"]:
+            raise ValueError("unexpected extra non-scalar checkpoint dimensions")
+        shape[idx] = source_hours
+        layout[field] = {"dims": dims, "shape": shape, "dtype": source["dtype"]}
+    return {
+        **identity,
+        "hours": source_hours,
+        "requested_fields": wanted,
+        "available_fields": available,
+        "raw_units": {name: identity["raw_units"][name] for name in available},
+        "array_layout": layout,
+    }
+
+
+def _seed_earlier_horizons(target, required_fields, emit):
+    """Safely reuse verified 24h/72h point data in a longer horizon.
+
+    Read-only source checkpoints must match run/plant/grid/units and all
+    array metadata apart from the lead-time axis length. Conflicts across
+    source horizons or with an existing target abort BEFORE writing.
+    """
+    if target.path is None:
+        return 0
+
+    target_id = target.identity
+    candidates = []
+    # Deliberate fixed milestones, never directory scanning or loose matching.
+    for hours in (72, 24):
+        if hours >= target_id["hours"]:
+            continue
+        for requested in (
+            target_id["requested_fields"],
+            list(required_fields),
+        ):
+            if candidates and any(
+                c[0] == hours and c[1] == list(requested) for c in candidates
+            ):
+                continue
+            candidates.append((hours, list(requested)))
+
+    combined = {}
+    observed_sources = []
+    for hours, requested in candidates:
+        source_id = _smaller_horizon_identity(target_id, hours, requested)
+        source = PointCheckpoint(target.path.parent, source_id, required_fields)
+        if not os.path.lexists(source.path):
+            continue
+        # Locks and exact identity checks; also verify SHA256 and every value.
+        with source:
+            snapshot = {lead: dict(row) for lead, row in source.values.items()}
+
+        for lead, values in snapshot.items():
+            target_row = target.values.get(lead, {})
+            merged_row = combined.setdefault(lead, {})
+            for field, value in values.items():
+                if (field in target_row and target_row[field] != value
+                        or field in merged_row and merged_row[field] != value):
+                    raise ValueError(
+                        "CHECKPOINT_CONFLICT: incompatible shorter-horizon "
+                        "point values for same run/site/hour"
+                    )
+                merged_row[field] = value
+        observed_sources.append(hours)
+
+    newly_saved = 0
+    for lead in sorted(combined, key=int):
+        for field, value in combined[lead].items():
+            if field not in target.values.get(lead, {}):
+                target.put(int(lead), field, value)
+                newly_saved += 1
+    if observed_sources:
+        emit(
+            f"REUSE_HORIZON: source_hours={sorted(set(observed_sources))} "
+            f"validated_values_imported={newly_saved}"
+        )
+    return newly_saved
+
 def load_direct(subset, request, emit, *, checkpoint_dir=None,
                 strict_quantiles=False):
     """Materialize only selected point scalars, at most four reads in flight.
@@ -330,6 +431,7 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None,
     with PointCheckpoint(checkpoint_dir, _identity(subset, request), P50_FIELDS) as cp:
         emit(f"DIRECT: no Dask; at most {WORKERS} point reads in flight")
         _seed_matching_p50_checkpoint(cp, P50_FIELDS, emit)
+        _seed_earlier_horizons(cp, P50_FIELDS, emit)
         if strict_quantiles:
             # A previously saved optional null is not proof that the
             # percentile will remain absent. Recheck it on a strict replay.

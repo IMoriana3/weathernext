@@ -162,3 +162,40 @@ Si la respuesta continua siendo `null`, la exportación estricta falla con
 `INCOMPLETE_QUANTILES` sin almacenar valores ficticios; los demás valores
 válidos siguen en el checkpoint. Esto evita que una descarga inicial aún
 incompleta bloquee permanentemente la actualización posterior.
+
+## Reutilización verificable entre horizontes: 24 → 72 → 360 horas
+
+**HECHO:** El Burgo I tiene un ciclo real 20261019_06hr_01_preds
+de 24 horas y 12 campos nativos, 288 valores verificados en Supabase.
+Esto NO certifica todavía 72 h ni 360 h.
+
+**INTENCIONAL:** El modo direct ahora reconoce checkpoints privados de
+horizontes exactamente 24 y 72 horas como fuentes parciales de un
+horizonte posterior del mismo run y celda. Deriva únicamente identidades
+conocidas, sin escanear ni confiar en nombres arbitrarios del directorio.
+
+- Solo cambia la longitud de lead_time. Exige coincidencia exacta del run,
+  coordenadas solicitadas/seleccionadas, init_time, unidades, dtype,
+  dimensiones, identidad de campos, SHA256 y permisos privados.
+- Reutiliza solo valores confirmados; checkpoints antiguos no se editan.
+- Dos fuentes con valores distintos para igual run/celda/hora/campo
+  provocan CHECKPOINT_CONFLICT antes de escribir en el destino.
+- Sin caché compatible, el lector original recupera valores de GCS;
+  no se interpreta la ausencia de caché como fallo meteorológico.
+- El modo estricto nunca inventa P10/P50/P90 ni publica JSON parcial.
+
+Con una caché 24 h de los 12 campos y mismo run, pedir 72 h debe reutilizar
+288 valores y solicitar los otros 576 (horas 25–72). Una vez validadas
+72 horas reales, 360 h podrá reutilizar 864 y recuperar las 3456 restantes.
+
+Comando previsto de 72 horas, solo tras CI verde y con Google autorizado:
+
+    WN3_FETCH_MODE=direct WN3_REQUIRE_ALL_QUANTILES=1 WN3_READ_TIMEOUT_SECONDS=900 \
+      bash ~/wn3.sh 41.575945 -0.798424 72 \
+      weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr
+
+El ciclo de octubre 19 es una referencia histórica. El mismo run permite
+reutilizar caché para ampliar el horizonte; un run nuevo NO puede
+reutilizar la información temporal de otro ciclo. Los datos no se
+envían a Supabase hasta validación del JSON de 72 h y contraste de
+los registros ya escritos. Sin automatización ni credenciales persistidas.
