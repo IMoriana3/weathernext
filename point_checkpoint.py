@@ -12,9 +12,73 @@ import hashlib
 import json
 import math
 import os
+import re
+import time
 from pathlib import Path
 import stat
 import tempfile
+
+
+# The underlying object-store client already retries transient requests.
+# Retry at the point level at most once more, then preserve and report the
+# original error. Never retry NotFound/auth errors or mask missing values.
+EXTRA_POINT_ATTEMPTS = 1
+EXTRA_POINT_RETRY_DELAY_SECONDS = 0.5
+
+
+def classify_point_read_error(exc):
+    """Return (safe category, retryable) without leaking remote exceptions.
+
+    GenericError is a documented obstore fallback, not an error diagnosis.
+    Never log its unfiltered message: it can include URLs and identifiers.
+    """
+    name = type(exc).__name__
+    if isinstance(exc, (FileNotFoundError,)) or name == "NotFoundError":
+        return "OBJECT_NOT_FOUND", False
+    if name in ("PermissionDeniedError", "UnauthenticatedError"):
+        return "ACCESS_DENIED", False
+    if isinstance(exc, TimeoutError):
+        return "REQUEST_TIMEOUT", True
+    if isinstance(exc, (ValueError, TypeError, IndexError)):
+        return "INVALID_DATA_OR_REQUEST", False
+
+    # HTTP codes, when present inside opaque obstore errors, can be
+    # classified safely without printing raw storage paths or credentials.
+    seen = set()
+    pending = [exc]
+    code = None
+    for _ in range(5):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        message = str(current)
+        status = re.search(
+            r"(?:http(?:/[12](?:\.[01])?)?|status(?:\s+code)?)"
+            r"\s*[:=]?\s*(401|403|404|408|429|500|502|503|504)\b",
+            message, re.IGNORECASE,
+        )
+        if status:
+            code = int(status.group(1))
+            break
+        pending.extend(
+            error for error in (current.__cause__, current.__context__)
+            if isinstance(error, Exception)
+        )
+    if code in (401, 403):
+        return f"HTTP_{code}_ACCESS_DENIED", False
+    if code == 404:
+        return "HTTP_404_NOT_FOUND", False
+    if code in (408, 429, 500, 502, 503, 504):
+        return f"HTTP_{code}_RETRYABLE", True
+    if name == "GenericError":
+        # A single additional probe, never an unbounded retry loop.
+        return "GENERIC_UNCLASSIFIED", True
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "CONNECTION_OR_IO_ERROR", True
+    return "UNCLASSIFIED", False
 
 CHECKPOINT_SCHEMA = "weathernext3-point-checkpoint-v1"
 MAX_CHECKPOINT_BYTES = 1024 * 1024
@@ -276,10 +340,53 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None):
                     continue
                 emit(f"DIRECT_HOUR: {lead}/{request.hours}; {len(missing)} values pending download")
                 futures = {executor.submit(read_scalar, f, index): f for f in missing}
+                errors = []
+                # Do not abort as_completed on the first exception: other
+                # in-flight fields may already be correct and must be saved.
                 for future in as_completed(futures):
                     field = futures[future]
-                    cp.put(lead, field, future.result())
-                # This marker is emitted only AFTER durable writes, if enabled.
+                    try:
+                        value = future.result()
+                    except Exception as exc:
+                        category, can_retry = classify_point_read_error(exc)
+                        emit(
+                            f"DIRECT_VALUE_ERROR: lead={lead} field={field} "
+                            f"category={category} attempt=1/"
+                            f"{1 + (EXTRA_POINT_ATTEMPTS if can_retry else 0)}"
+                        )
+                        errors.append((field, exc, can_retry))
+                    else:
+                        cp.put(lead, field, value)
+
+                # Retry only failed fields, sequentially. Authentication,
+                # missing chunk objects, or bad numerical data are not
+                # repaired or replaced by extrapolated values.
+                for field, original, can_retry in errors:
+                    if not can_retry:
+                        raise original
+                    for attempt in range(1, EXTRA_POINT_ATTEMPTS + 1):
+                        emit(
+                            f"DIRECT_RETRY: lead={lead} field={field} "
+                            f"attempt={attempt + 1}/{EXTRA_POINT_ATTEMPTS + 1}"
+                        )
+                        time.sleep(EXTRA_POINT_RETRY_DELAY_SECONDS * attempt)
+                        try:
+                            value = read_scalar(field, index)
+                        except Exception as exc:
+                            category, again = classify_point_read_error(exc)
+                            emit(
+                                f"DIRECT_VALUE_ERROR: lead={lead} field={field} "
+                                f"category={category} attempt={attempt + 1}/"
+                                f"{EXTRA_POINT_ATTEMPTS + 1}"
+                            )
+                            if not again or attempt == EXTRA_POINT_ATTEMPTS:
+                                raise
+                        else:
+                            cp.put(lead, field, value)
+                            emit(f"DIRECT_RETRY_OK: lead={lead} field={field}")
+                            break
+
+                # Only emit OK after every required field is saved.
                 emit(f"DIRECT_HOUR_OK: {lead}/{request.hours}")
         # Replace only selected small arrays. Do not recompute/copy global data.
         result = xr.Dataset(coords=subset.coords, attrs=subset.attrs)
