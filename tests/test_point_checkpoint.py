@@ -81,6 +81,131 @@ class DirectCheckpointTests(unittest.TestCase):
         self.assertEqual(actual, select_point(fake_dataset(hours=360), req))
         self.assertEqual(len(log), 360*12)
 
+    def test_24h_full_quantiles_are_reused_by_72h_without_reread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initial, initial_reads = lazy_dataset(hours=360)
+            select_point(initial, request(24, all_fields=True),
+                         fetch_mode="direct", strict_quantiles=True,
+                         checkpoint_dir=directory)
+            self.assertEqual(len(initial_reads), 24 * 12)
+
+            larger, new_reads = lazy_dataset(hours=360)
+            messages = []
+            actual = select_point(
+                larger, request(72, all_fields=True),
+                fetch_mode="direct", strict_quantiles=True,
+                checkpoint_dir=directory, progress=messages.append,
+            )
+            expected = select_point(fake_dataset(hours=360),
+                                    request(72, all_fields=True))
+            self.assertEqual(actual, expected)
+            self.assertEqual(len(new_reads), (72 - 24) * 12)
+            self.assertTrue(all(lead > 24 for _, lead, _ in new_reads))
+            self.assertTrue(any(
+                "REUSE_HORIZON: source_hours=[24] "
+                "validated_values_imported=288" in message
+                for message in messages
+            ))
+            self.assertTrue(any(
+                "288/864 source scalars retained" in message
+                for message in messages
+            ))
+
+    def test_72h_to_360h_reuses_first_72h_and_detects_prefix_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initial, _ = lazy_dataset(hours=360)
+            select_point(initial, request(24, all_fields=True),
+                         fetch_mode="direct", checkpoint_dir=directory)
+            medium, _ = lazy_dataset(hours=360)
+            select_point(medium, request(72, all_fields=True),
+                         fetch_mode="direct", checkpoint_dir=directory)
+
+            long_source, long_reads = lazy_dataset(hours=360)
+            logs = []
+            result = select_point(
+                long_source, request(360, all_fields=True),
+                fetch_mode="direct", strict_quantiles=True,
+                checkpoint_dir=directory, progress=logs.append,
+            )
+            self.assertEqual(result["returned_hours"], 360)
+            self.assertEqual(len(long_reads), (360 - 72) * 12)
+            self.assertTrue(all(lead > 72 for _, lead, _ in long_reads))
+            self.assertTrue(any(
+                "REUSE_HORIZON: source_hours=[24, 72] "
+                "validated_values_imported=864" in line
+                for line in logs
+            ))
+            self.assertEqual(result, select_point(
+                fake_dataset(hours=360), request(360, all_fields=True)
+            ))
+
+    def test_p50_only_24h_seed_expands_72h_probabilistic_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initial, _ = lazy_dataset(hours=360)
+            select_point(initial, request(24),
+                         fetch_mode="direct", checkpoint_dir=directory)
+            full, reads = lazy_dataset(hours=360)
+            logs = []
+            output = select_point(
+                full, request(72, all_fields=True),
+                fetch_mode="direct", strict_quantiles=True,
+                checkpoint_dir=directory, progress=logs.append,
+            )
+            self.assertEqual(output["returned_hours"], 72)
+            self.assertEqual(len(reads), 72 * 12 - 24 * 4)
+            self.assertFalse(any(
+                field.endswith("_p50") and lead <= 24
+                for field, lead, _ in reads
+            ))
+            self.assertTrue(any(
+                "validated_values_imported=96" in msg
+                for msg in logs
+            ))
+
+    def test_source_horizon_identity_must_match_site_and_units(self):
+        for changed in ("site", "units"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                source, _ = lazy_dataset(hours=360)
+                select_point(source, request(24, all_fields=True),
+                             fetch_mode="direct", checkpoint_dir=directory)
+                ds, new_reads = lazy_dataset(hours=360)
+                if changed == "site":
+                    requested = request(72, all_fields=True, lon=-.099)
+                else:
+                    ds["wind_speed_10m_p90"].attrs["units"] = "changed-unit"
+                    requested = request(72, all_fields=True)
+                lines = []
+                select_point(ds, requested, fetch_mode="direct",
+                             checkpoint_dir=directory, progress=lines.append)
+                self.assertEqual(len(new_reads), 72 * 12)
+                self.assertFalse(any("REUSE_HORIZON:" in msg for msg in lines))
+
+    def test_horizon_cache_conflict_fails_before_any_data_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, _ = lazy_dataset(hours=360)
+            select_point(dataset, request(24, all_fields=True),
+                         fetch_mode="direct", checkpoint_dir=directory)
+            dataset, _ = lazy_dataset(hours=360)
+            select_point(dataset, request(72, all_fields=True),
+                         fetch_mode="direct", checkpoint_dir=directory)
+            cache_files = Path(directory).glob("*.checkpoint.json")
+            target = next(
+                path for path in cache_files
+                if json.loads(path.read_text())["body"]["identity"]["hours"] == 72
+            )
+            obj = json.loads(target.read_text())
+            obj["body"]["values"]["1"]["temperature_2m_p50"] += 1.0
+            obj["sha256"] = _digest(obj["body"])
+            atomic_json(target, obj)
+            before = target.read_bytes()
+
+            ds, reads = lazy_dataset(hours=360)
+            with self.assertRaisesRegex(ValueError, "CHECKPOINT_CONFLICT"):
+                select_point(ds, request(72, all_fields=True),
+                             fetch_mode="direct", checkpoint_dir=directory)
+            self.assertEqual(reads, [])
+            self.assertEqual(target.read_bytes(), before)
+
     def test_full_quantiles_reuse_all_24_hours_of_p50_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             p50_dataset, p50_reads = lazy_dataset(hours=24)
