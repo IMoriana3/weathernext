@@ -16,8 +16,10 @@ import xarray as xr
 from xarray.backends.common import BackendArray
 from xarray.core import indexing
 
-from point_checkpoint import PointCheckpoint, _identity, atomic_json, _digest
-from point_reader import PointRequest, P50_FIELDS, select_point, main, read_gcs_point
+from point_checkpoint import (PointCheckpoint, _identity, atomic_json, _digest,
+                              classify_point_read_error)
+from point_reader import (PointRequest, P50_FIELDS, select_point, main,
+                          read_gcs_point, require_complete_quantiles)
 from test_point_reader import fake_dataset, SYNOPTIC
 
 
@@ -155,6 +157,186 @@ class DirectCheckpointTests(unittest.TestCase):
                 select_point(ds, request(3, all_fields=True),
                              fetch_mode='direct', checkpoint_dir=directory)
             self.assertEqual(reads, [])
+
+    def test_opaque_generic_error_reports_safe_variable_and_retries_only_failure(self):
+        class GenericError(Exception):
+            pass
+
+        source, reads = lazy_dataset(hours=3)
+        original = TracedBackend._get
+        attempts = {"n": 0}
+        def flaky(backend, key):
+            lead = int(key[0]) + 1
+            if (backend.field == "temperature_2m_p10" and lead == 1
+                    and attempts["n"] == 0):
+                attempts["n"] += 1
+                raise GenericError(
+                    "HTTP 503 https://restricted.example/?access_token=SECRET"
+                )
+            return original(backend, key)
+
+        logs = []
+        with patch.object(TracedBackend, "_get", flaky):
+            with patch("point_checkpoint.time.sleep") as waiting:
+                result = select_point(
+                    source, request(3, all_fields=True),
+                    fetch_mode="direct", progress=logs.append,
+                )
+        waiting.assert_called_once()
+        self.assertEqual(result["returned_hours"], 3)
+        self.assertEqual(attempts["n"], 1)
+        self.assertTrue(any(
+            "DIRECT_VALUE_ERROR: lead=1 field=temperature_2m_p10 "
+            "category=HTTP_503_RETRYABLE" in line for line in logs
+        ))
+        self.assertTrue(any(
+            line == "DIRECT_RETRY_OK: lead=1 field=temperature_2m_p10"
+            for line in logs
+        ))
+        self.assertNotIn("access_token", str(logs))
+        self.assertNotIn("SECRET", str(logs))
+        self.assertEqual(len(reads), 3 * 12)
+
+    def test_generic_error_does_not_discard_other_successful_fields(self):
+        class GenericError(Exception):
+            pass
+
+        req = request(3, all_fields=True)
+        with tempfile.TemporaryDirectory() as directory:
+            saved, _ = lazy_dataset(hours=3)
+            select_point(saved, request(3), fetch_mode="direct",
+                         checkpoint_dir=directory)
+
+            first, initial_reads = lazy_dataset(hours=3)
+            original = TracedBackend._get
+            def always_fails(backend, key):
+                lead = int(key[0]) + 1
+                if backend.field == "temperature_2m_p10" and lead == 1:
+                    raise GenericError("opaque upstream error with SECRET_TOKEN")
+                return original(backend, key)
+
+            progress = []
+            with patch.object(TracedBackend, "_get", always_fails):
+                with patch("point_checkpoint.time.sleep"):
+                    with self.assertRaises(GenericError):
+                        select_point(first, req, fetch_mode="direct",
+                                     checkpoint_dir=directory,
+                                     progress=progress.append)
+
+            full_checkpoint = [
+                p for p in Path(directory).glob("*.checkpoint.json")
+                if len(json.loads(p.read_text())["body"]["identity"]
+                       ["requested_fields"]) == 12
+            ]
+            self.assertEqual(len(full_checkpoint), 1)
+            cache = json.loads(full_checkpoint[0].read_text())["body"]["values"]
+            self.assertEqual(len(cache["1"]), 11)  # 4 median + 7 good quantiles
+            self.assertNotIn("temperature_2m_p10", cache["1"])
+            self.assertEqual(len([
+                f for f in initial_reads if f[1] == 1
+            ]), 7)
+            self.assertTrue(any(
+                "category=GENERIC_UNCLASSIFIED" in line for line in progress
+            ))
+            self.assertNotIn("SECRET_TOKEN", str(progress))
+
+            replay, rereads = lazy_dataset(hours=3)
+            out = select_point(replay, req, fetch_mode="direct",
+                               checkpoint_dir=directory)
+            self.assertEqual(out, select_point(fake_dataset(hours=3), req))
+            self.assertEqual([f for f, h, _ in rereads if h == 1],
+                             ["temperature_2m_p10"])
+            self.assertTrue(all(not f.endswith("_p50") for f, _, _ in rereads))
+
+    def test_nonretryable_404_and_permission_errors_are_categorized(self):
+        class GenericError(Exception):
+            pass
+        class PermissionDeniedError(Exception):
+            pass
+
+        cases = [
+            (GenericError("HTTP 404 private_url secret"), "HTTP_404_NOT_FOUND"),
+            (GenericError("status code: 403 secret"), "HTTP_403_ACCESS_DENIED"),
+            (PermissionDeniedError("Bearer secret"), "ACCESS_DENIED"),
+            (ValueError("bad shape"), "INVALID_DATA_OR_REQUEST"),
+        ]
+        for exc, expected in cases:
+            with self.subTest(category=expected):
+                category, retriable = classify_point_read_error(exc)
+                self.assertEqual(category, expected)
+                self.assertFalse(retriable)
+
+    def test_fatal_access_denied_never_retries_and_preserves_other_fields(self):
+        class PermissionDeniedError(Exception):
+            pass
+        req = request(3, all_fields=True)
+        ds, reads = lazy_dataset(hours=3)
+        original = TracedBackend._get
+        def denied(backend, key):
+            if (backend.field == "wind_speed_10m_p90"
+                    and int(key[0]) == 0):
+                raise PermissionDeniedError("Authorization token super_secret")
+            return original(backend, key)
+        messages = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(TracedBackend, "_get", denied):
+                with patch("point_checkpoint.time.sleep") as sleeper:
+                    with self.assertRaises(PermissionDeniedError):
+                        select_point(ds, req, fetch_mode="direct",
+                                     checkpoint_dir=directory,
+                                     progress=messages.append)
+            sleeper.assert_not_called()
+            self.assertTrue(any(
+                "category=ACCESS_DENIED" in line and
+                "field=wind_speed_10m_p90" in line for line in messages
+            ))
+            self.assertNotIn("super_secret", str(messages))
+            cache_file, = Path(directory).glob("*.checkpoint.json")
+            cache = json.loads(cache_file.read_text())["body"]["values"]
+            self.assertEqual(len(cache["1"]), 11)
+
+    def test_strict_quantiles_recheck_optional_null_cached_in_previous_run(self):
+        req = request(3, all_fields=True)
+        initial = fake_dataset(hours=3)
+        initial["total_cloud_cover_p90"].values[0, 1, 1] = np.nan
+        ds, _ = lazy_dataset(hours=3, source=initial)
+        with tempfile.TemporaryDirectory() as directory:
+            # Non-strict transport explicitly permits null optional values.
+            partial = select_point(ds, req, fetch_mode="direct",
+                                   checkpoint_dir=directory)
+            self.assertIsNone(partial["samples"][0]["native_values"]
+                              ["total_cloud_cover_p90"])
+            replacement, reads = lazy_dataset(hours=3)
+            progress = []
+            complete = select_point(
+                replacement, req, fetch_mode="direct",
+                checkpoint_dir=directory, strict_quantiles=True,
+                progress=progress.append,
+            )
+            self.assertEqual(reads, [
+                ("total_cloud_cover_p90", 1, (0, 1, 1))
+            ])
+            self.assertTrue(any("STRICT_RECHECK: 1" in line
+                                for line in progress))
+            self.assertIsNone(require_complete_quantiles(complete))
+
+    def test_strict_quantiles_reject_null_without_caching_it(self):
+        req = request(3, all_fields=True)
+        source = fake_dataset(hours=3)
+        source["total_cloud_cover_p90"].values[1, 1, 1] = np.nan
+        ds, _ = lazy_dataset(hours=3, source=source)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ValueError, "INCOMPLETE_QUANTILES"
+            ):
+                select_point(ds, req, fetch_mode="direct",
+                             strict_quantiles=True,
+                             checkpoint_dir=directory)
+            checkpoint, = Path(directory).glob("*.checkpoint.json")
+            cache = json.loads(checkpoint.read_text())["body"]["values"]
+            self.assertNotIn("total_cloud_cover_p90", cache.get("2", {}))
+            # Existing successful values are kept; no fake percentile written.
+            self.assertTrue(any(cache.values()))
 
     def test_11_hours_survive_timeout_and_resume_without_rereading_them(self):
         req = request()

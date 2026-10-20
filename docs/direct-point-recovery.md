@@ -118,3 +118,47 @@ Supabase; solo un JSON final completo validado puede pasar al adaptador.
 
 El objetivo posterior de 72/360 horas requiere una extracción/certificación
 independiente y no queda verificado por esta prueba de 24 horas.
+
+## Diagnóstico de GenericError durante la ampliación P10/P90
+
+Evidencia del operador, El Burgo I, ciclo 20261019_06 UTC, 24h:
+
+- Los 96 escalares P50 se recuperaron del checkpoint previo.
+- Primera descarga P10/P90: `Read blocked: GenericError` durante la primera hora. La siguiente reanudación conservó `102/288` escalares y alcanzó `DIRECT_HOUR_OK 1/24` antes de volver a dar `GenericError` en la hora 2.
+- El nombre `GenericError` por sí solo **NO** demuestra 404, falta de permisos, campo ausente ni limitación física. Es una clase genérica documentada por obstore.
+
+Cambios para impedir repetir descargas innecesarias y obtener evidencia:
+
+1. Cada error imprime únicamente el campo nativo, lead y **categoría segura**
+   (`DIRECT_VALUE_ERROR`). No imprime mensajes sin filtrar de GCS, URLs ni tokens.
+2. Al fallar una lectura de ocho campos, espera y registra **todos los demás éxitos**
+   de ese lote antes de decidir si reintenta; el código anterior abandonaba
+   `as_completed` en la primera excepción y podía perder otros éxitos.
+3. Los fallos de acceso/credenciales, 404 y validación numérica **NO** se reintentan.
+   Los 408/429/5xx, errores de conexión/timeout y `GenericError` sin clasificación
+   reciben como máximo **un segundo intento** puntual, secuencial y con retardo.
+4. Un error persistente sigue interrumpiendo la exportación completa y mantiene
+   todos los valores válidos ya guardados. No se generan valores de relleno.
+5. La clasificación del código HTTP, si obstore lo incluye en el mensaje, se
+   analiza **localmente** y solo se expone el código; no se publica el mensaje
+   bruto ni información de autenticación.
+
+Estado: **BUG** de manejo de excepciones corregido en el código; causa real del
+`GenericError` remoto: **UNKNOWN**, pendiente de una nueva observación
+autenticada. Un CI sintético verde no acredita la recepción de P10/P90 en GCS.
+
+Documentación: https://developmentseed.org/obstore/latest/api/exceptions/
+y https://developmentseed.org/obstore/latest/api/store/config/
+
+## Valores opcionales que llegan como null
+
+En la exportación nativa ordinaria, P10/P90 faltantes pueden conservarse como
+`null` y mostrarse expresamente como ausentes. Sin embargo, una ejecución con
+`WN3_REQUIRE_ALL_QUANTILES=1` **no reutiliza** un `null` opcional persistido
+por una prueba menos estricta. Lo elimina de la caché de forma atómica y vuelve
+a solicitar únicamente esa variable y hora.
+
+Si la respuesta continua siendo `null`, la exportación estricta falla con
+`INCOMPLETE_QUANTILES` sin almacenar valores ficticios; los demás valores
+válidos siguen en el checkpoint. Esto evita que una descarga inicial aún
+incompleta bloquee permanentemente la actualización posterior.
