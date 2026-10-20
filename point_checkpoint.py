@@ -291,7 +291,8 @@ def _seed_matching_p50_checkpoint(target, required_fields, emit):
          f"compatible private checkpoint")
     return imported
 
-def load_direct(subset, request, emit, *, checkpoint_dir=None):
+def load_direct(subset, request, emit, *, checkpoint_dir=None,
+                strict_quantiles=False):
     """Materialize only selected point scalars, at most four reads in flight.
 
     Coordinates/time selection and final JSON validation remain in the
@@ -317,9 +318,11 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None):
             raise ValueError("unexpected extra data dimensions in direct point read")
         value = float(data.item())
         if not math.isfinite(value):
-            if field in P50_FIELDS:
+            if field in P50_FIELDS or strict_quantiles:
+                marker = ("INCOMPLETE_QUANTILES" if strict_quantiles
+                          else "INCOMPLETE_HOURLY_VALUES")
                 raise ValueError(
-                    f"INCOMPLETE_HOURLY_VALUES: {field} at lead {index + 1}"
+                    f"{marker}: {field} at lead {index + 1}"
                 )
             value = None
         return value
@@ -327,6 +330,24 @@ def load_direct(subset, request, emit, *, checkpoint_dir=None):
     with PointCheckpoint(checkpoint_dir, _identity(subset, request), P50_FIELDS) as cp:
         emit(f"DIRECT: no Dask; at most {WORKERS} point reads in flight")
         _seed_matching_p50_checkpoint(cp, P50_FIELDS, emit)
+        if strict_quantiles:
+            # A previously saved optional null is not proof that the
+            # percentile will remain absent. Recheck it on a strict replay.
+            removed = 0
+            for lead, cached in list(cp.values.items()):
+                for field, value in list(cached.items()):
+                    if field in fields and value is None:
+                        del cached[field]
+                        removed += 1
+                if not cached:
+                    del cp.values[lead]
+            if removed:
+                if cp.path is not None:
+                    body = {"schema": CHECKPOINT_SCHEMA, "identity": cp.identity,
+                            "values": cp.values}
+                    atomic_json(cp.path, {"body": body, "sha256": _digest(body)})
+                emit(f"STRICT_RECHECK: {removed} previously-null optional "
+                     "values are pending source verification")
         saved = sum(len(row) for row in cp.values.values())
         emit(f"RESUME: {cp.completed_hours()}/{request.hours} P50 hours cached; "
              f"{saved}/{request.hours * len(fields)} source scalars retained")
