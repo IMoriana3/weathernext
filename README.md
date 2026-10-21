@@ -16,7 +16,9 @@ For one geographic grid cell, it reads up to **12 native source fields**: temper
 ## Contents
 
 - \`point_reader.py\` — bounded GCS Zarr transport; selects variables, grid cell and lead times before loading data.
-- \`tests/\` — isolated regression tests for 48/72/360 h, percentiles, units, longitude seam and missing data.
+- \`tests/\` — isolated regression tests for 48/72/360 h, percentiles, units, longitude seam, missing data and guarded ingestion.
+- \`scheduled_ingest.py\` — opt-in authorized current-run ingestion and readback; disabled unless explicitly approved.
+- \`.github/workflows/ingest.yml\` — optional twice-daily schedule, disabled by default.
 - \`.github/workflows/verify.yml\` — offline tests on standard public GitHub Actions runners.
 - \`docs/transport.md\` — schema, safety and runtime contract.
 
@@ -28,7 +30,7 @@ Google's statistics bucket requires an approved identity. Anonymous requests ret
 
 ## Cost policy
 
-**Additional expenditure: zero.** No billing activation, paid services, scheduled extraction or automatic uploads.
+**Default extra expenditure: zero.** The optional scheduled workflow is disabled until an operator explicitly configures approval, Google Workload Identity Federation and a backend-only Supabase secret. No new billing, identities, scheduled cloud resources or automatic uploads are activated by merging this repository.
 
 Google lists the **statistics** bucket as *Requester Pays OFF*. This does not prove every network or processing operation has no cost; use only explicitly approved interactive access for remote tests.
 
@@ -52,6 +54,8 @@ primary key, authorized-write boundary and current limitations.
 
 ## Current status
 
-Source and offline tests are integrated. An authenticated 360-hour live read and an unattended access method are **not yet validated**. The repository does not fetch data automatically.
+A historical 360-hour WeatherNext 3 cycle for El Burgo I was extracted with authorized Cloud Shell and verified end-to-end in Supabase: 360 hourly rows, 4,320 native P10/P50/P90 values, zero readback differences. This **does not validate operational forecast accuracy or automatic updates**.
+
+A new opt-in worker, `scheduled_ingest.py`, and the gated `.github/workflows/ingest.yml` prepare the next phase: 24-hour current-run ingestion through approved GitHub OIDC/GCP identity and Supabase backend-only credentials. The automated end-to-end run, permissions, cost and long-horizon persistent staging are **not yet validated or activated**. See [automated ingestion](docs/automated-ingestion.md).
 
 See [transport contract](docs/transport.md) for full usage details and limits.
