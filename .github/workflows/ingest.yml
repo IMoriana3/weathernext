@@ -1,0 +1,73 @@
+name: WeatherNext 3 approved ingestion
+
+# Inactive unless WN3_INGESTION_APPROVED=true is explicitly configured.
+# Requires an approved Google Workload Identity Federation principal and
+# a Supabase backend-only secret. No billing or credentials provisioned here.
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Bounded synoptic point horizon (default 24h)"
+        type: choice
+        options: ["24", "72", "360"]
+        default: "24"
+        required: true
+  schedule:
+    - cron: "17 6,18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wn3-ingestion-single-writer
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    if: ${{ vars.WN3_INGESTION_APPROVED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      WN3_INGESTION_APPROVED: "true"
+      WN3_SUPABASE_URL: ${{ vars.WN3_SUPABASE_URL }}
+      WN3_SUPABASE_SECRET_KEY: ${{ secrets.WN3_SUPABASE_SECRET_KEY }}
+      WN3_PLANTA_ID: ${{ vars.WN3_PLANTA_ID }}
+      WN3_SITE_CODE: ${{ vars.WN3_SITE_CODE }}
+      WN3_SITE_LAT: ${{ vars.WN3_SITE_LAT }}
+      WN3_SITE_LON: ${{ vars.WN3_SITE_LON }}
+      WN3_HOURS: ${{ github.event.inputs.hours || '24' }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install isolated Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Authenticate Google Cloud with approved OIDC workload identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WN3_GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.WN3_GCP_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Install pinned transport dependencies
+        run: python -m pip install --no-cache-dir -r requirements.txt
+      - name: Discover, validate and conditionally publish native point forecast
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scheduled_ingest.py \
+            --planta-id "$WN3_PLANTA_ID" \
+            --site-code "$WN3_SITE_CODE" \
+            --lat "$WN3_SITE_LAT" \
+            --lon "$WN3_SITE_LON" \
+            --hours "$WN3_HOURS" \
+            --checkpoint-dir "$RUNNER_TEMP/wn3-point-checkpoints" \
+            --publish

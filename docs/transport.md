@@ -115,7 +115,7 @@ These are **placeholders**, not valid dataset paths. Replace YYYYMMDD and the sa
 
 The statistics bucket requires Google-approved identity; anonymous requests fail. The statistics bucket is Requester Pays OFF, but this does not imply zero network or processing costs in all circumstances. No cloud billing is activated in this project.
 
-Do not commit credentials, account details, operational locations or private data. Historical forecasts and recent/future forecasts have different provider licences. This package contains **no scheduler, unattended extraction, external upload or downstream endpoint**.
+Do not commit credentials, account details, operational locations or private data. Historical forecasts and recent/future forecasts have different provider licences. The **manual transport** contains no scheduler or external upload. A **separate opt-in** current-run ingestion worker and gated GitHub Actions workflow are documented at [automated ingestion](automated-ingestion.md); they remain disabled by default until explicit approval and authenticated end-to-end testing.
 
 An offline green test is **not** an authenticated 360-hour upstream read, and does not establish production integration.
 
@@ -134,9 +134,7 @@ Its verified target contract is:
 Database uniqueness is (planta_id, source_id, init_time, valid_time).
 An authenticated web user may read according to RLS, but ordinary authenticated
 sessions are **not** a forecast-ingestion credential. Privileged database writes
-require a separately authorized protected server-side channel. This transport
-adapter neither contains nor requests a Supabase key, performs network calls,
-or writes to the database.
+require a separately authorized protected server-side channel. This *pure* transport adapter neither contains nor requests a Supabase key, performs network calls, nor writes to the database. The **distinct** opt-in `scheduled_ingest.py` runner provides protected server-side writes without changing the adapter's behavior; it is not automatically enabled.
 
 After **an actual authorized Zarr point extraction**, select the exact verified
 Supabase plant id and coordinates, and produce local rows:
@@ -152,8 +150,7 @@ The output/ folder is ignored by Git. Do not publish raw exports publicly.
 
 An authorized ingestion implementation can upsert these validated rows against
 the **existing** primary key, with a verification read of row counts, provenance
-and time range afterwards. Until that authenticated step succeeds,
-public.meteo_pronosticos remains empty; no imported data is claimed.
+and time range afterwards. The historical El Burgo I cycle `20261019_06hr_01_preds` has since been independently validated and stored in the existing table: 360 rows × 12 source fields = 4,320 exact values, with zero differences on Supabase readback. Other cycles and unattended ingestion are **not** thereby certified.
 
 **Contract boundary:** This is a transport/cache adapter, not
 df_meteo_canonical, MeteoReport, or WeatherContract v2. Those are owned by
