@@ -217,6 +217,87 @@ class ProtectedSupabase:
         ], body=_json(rows))
 
 
+
+def _verified_complete_run(saved, *, hours, prefix, initialized, lat, lon):
+    """Avoid re-downloading an already-complete source run on repeat schedule.
+
+    This is an optimization, not a substitute for source verification during
+    first publication. Only verified raw transport rows of THIS run/cell and
+    the exact expected percentile/units envelope may be reused.
+    """
+    import math
+
+    if not isinstance(saved, list) or len(saved) > 360:
+        raise IngestionBlocked("INVALID_EXISTING_SNAPSHOT")
+    by_lead = {}
+    for row in saved:
+        lead = row.get("lead_hour")
+        if type(lead) is not int or not 1 <= lead <= 360 or lead in by_lead:
+            raise IngestionBlocked("DUPLICATE_OR_INVALID_EXISTING_LEAD")
+        by_lead[lead] = row
+
+    if any(i not in by_lead for i in range(1, hours + 1)):
+        return False
+
+    for lead in range(1, hours + 1):
+        row = by_lead[lead]
+        if _utc(row.get("valid_time")) != initialized + timedelta(hours=lead):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        p = row.get("provenance")
+        if not isinstance(p, dict):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        point = p.get("requested_grid_point")
+        cell = p.get("selected_grid_point")
+        if not isinstance(point, dict) or not isinstance(cell, dict):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        try:
+            site_matches = (
+                abs(point["lat"] - lat) <= 0.00001
+                and abs((point["lon"] - lon + 180) % 360 - 180) <= 0.00001
+                and abs(cell["lat"] - lat) <= 0.11
+                and abs((cell["lon_360"] - lon + 180) % 360 - 180) <= 0.11
+            )
+        except (TypeError, KeyError):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN") from None
+        if not site_matches:
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        if (
+            p.get("run_prefix") != prefix
+            or p.get("kind") != "raw_model_forecast_not_field_measurement"
+            or p.get("transport_schema") != "weathernext3-zarr-point-v2"
+            or p.get("bucket") != "weathernext3_statistics_spatial"
+            or p.get("unit_conversions_applied") is not False
+            or p.get("weather_contract_built") is not False
+            or p.get("operational_control_permitted") is not False
+            or p.get("available_fields") != list(FIELDS)
+            or p.get("requested_fields") != list(FIELDS)
+            or p.get("missing_upstream_fields") != []
+        ):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        units = p.get("raw_units")
+        if not isinstance(units, dict) or len(units) != len(FIELDS) or any(
+                units.get(f"{variable}_{quantile}") != expected
+                for variable, expected in EXPECTED_UNITS.items()
+                for quantile in ("p10", "p50", "p90")
+        ):
+            raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        for quantile in ("p10", "p50", "p90"):
+            values = row.get(quantile)
+            if not isinstance(values, dict) or set(values) != set(VARIABLES):
+                raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+            if any(type(value) not in (float, int) or not math.isfinite(value)
+                   for value in values.values()):
+                raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+        for variable in VARIABLES:
+            lo, mid, hi = (row[q][variable] for q in ("p10", "p50", "p90"))
+            if not lo <= mid <= hi:
+                raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+            if variable == "total_cloud_cover" and not 0 <= lo <= hi <= 1:
+                raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+            if variable in ("wind_speed_10m", "surface_solar_radiation_downwards_1hr") and lo < 0:
+                raise IngestionBlocked("FORECAST_CONFLICT_EXISTING_RUN")
+    return True
+
 def publish_rows(client, rows, *, init_time):
     """Preflight, insert only missing rows, then read back and verify all.
 
@@ -253,6 +334,16 @@ def run_once(*, planta_id, site_code, lat, lon, hours, prefix, now,
         if client is None:
             raise IngestionBlocked("NO_AUTHORIZED_SUPABASE_CLIENT")
         client.verify_plant(planta_id, site_code)
+        current = client.existing_run(
+            planta_id, initialized.isoformat().replace("+00:00", "Z")
+        )
+        if _verified_complete_run(
+            current, hours=hours, prefix=prefix,
+            initialized=initialized, lat=lat, lon=lon,
+        ):
+            emit = progress or (lambda _: None)
+            emit(f"EXISTING_RUN_VERIFIED_NO_FETCH: {hours} complete hours")
+            return 0
     req = PointRequest(lat, lon, prefix, hours, False)
     emit(f"RUN_ACCEPTED: horizon={hours}h init_utc={initialized.isoformat()}")
     # Deliberately read full source before publishing; a partial checkpoint
