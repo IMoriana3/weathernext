@@ -1,13 +1,18 @@
 name: WeatherNext 3 approved ingestion
 
-# Inactive unless WN3_INGESTION_APPROVED=true is explicitly configured.
-# Requires an approved Google Workload Identity Federation principal and
-# a Supabase backend-only secret. No billing or credentials provisioned here.
+# Manual auth-check does not require Supabase credentials or publishing approval.
+# Publication and scheduled cycles require explicit repository approval.
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Test Google identity only, or publish an approved run"
+        type: choice
+        options: ["auth-check", "publish"]
+        default: "auth-check"
+        required: true
       hours:
-        description: "Bounded synoptic point horizon (default 24h)"
+        description: "Forecast horizon for an approved publish run"
         type: choice
         options: ["24", "72", "360"]
         default: "24"
@@ -24,21 +29,12 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ vars.WN3_INGESTION_APPROVED == 'true' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check') || vars.WN3_INGESTION_APPROVED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
       contents: read
       id-token: write
-    env:
-      WN3_INGESTION_APPROVED: "true"
-      WN3_SUPABASE_URL: ${{ vars.WN3_SUPABASE_URL }}
-      WN3_SUPABASE_SECRET_KEY: ${{ secrets.WN3_SUPABASE_SECRET_KEY }}
-      WN3_PLANTA_ID: ${{ vars.WN3_PLANTA_ID }}
-      WN3_SITE_CODE: ${{ vars.WN3_SITE_CODE }}
-      WN3_SITE_LAT: ${{ vars.WN3_SITE_LAT }}
-      WN3_SITE_LON: ${{ vars.WN3_SITE_LON }}
-      WN3_HOURS: ${{ github.event.inputs.hours || '24' }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v4
@@ -57,10 +53,31 @@ jobs:
           export_environment_variables: true
       - name: Install Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v2
+      - name: Check Google WIF and WeatherNext GCS access without publishing
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GOOGLE_APPLICATION_CREDENTIALS:-}"
+          timeout 30s gcloud auth print-access-token >/dev/null
+          timeout 90s gcloud storage ls \
+            gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/ >/dev/null
+          echo "WN3_GCP_AUTH_AND_LIST_OK (no Supabase write or forecast export)"
       - name: Install pinned transport dependencies
+        if: ${{ vars.WN3_INGESTION_APPROVED == 'true' && (github.event_name == 'schedule' || inputs.mode == 'publish') }}
         run: python -m pip install --no-cache-dir -r requirements.txt
       - name: Discover, validate and conditionally publish native point forecast
+        if: ${{ vars.WN3_INGESTION_APPROVED == 'true' && (github.event_name == 'schedule' || inputs.mode == 'publish') }}
         shell: bash
+        env:
+          WN3_INGESTION_APPROVED: "true"
+          WN3_SUPABASE_URL: ${{ vars.WN3_SUPABASE_URL }}
+          WN3_SUPABASE_SECRET_KEY: ${{ secrets.WN3_SUPABASE_SECRET_KEY }}
+          WN3_PLANTA_ID: ${{ vars.WN3_PLANTA_ID }}
+          WN3_SITE_CODE: ${{ vars.WN3_SITE_CODE }}
+          WN3_SITE_LAT: ${{ vars.WN3_SITE_LAT }}
+          WN3_SITE_LON: ${{ vars.WN3_SITE_LON }}
+          WN3_HOURS: ${{ github.event.inputs.hours || '24' }}
         run: |
           set -euo pipefail
           python scheduled_ingest.py \
