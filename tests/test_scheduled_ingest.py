@@ -203,6 +203,58 @@ class IngestTests(TestCase):
         self.assertTrue(received[0][1]["strict_quantiles"])
         self.assertEqual(received[0][1]["checkpoint_dir"], "/private/checkpoints")
 
+    def test_complete_existing_run_skips_gcs_and_avoids_rebilling(self):
+        doc = valid_payload()
+        client = self.client(doc, rows_for(doc))
+        def no_gcs(*args, **kwargs):
+            self.fail("a complete verified run should not re-download GCS")
+        out = []
+        result = run_once(
+            planta_id=1, site_code="24002",
+            lat=SITE_LAT, lon=SITE_LON, hours=24, prefix=RUN,
+            now=INITIAL + timedelta(hours=12),
+            publish=True, client=client, read_point=no_gcs,
+            progress=out.append,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(client.written, [])
+        self.assertEqual(client.read_calls, 1)
+        self.assertTrue(any("EXISTING_RUN_VERIFIED_NO_FETCH" in m for m in out))
+
+    def test_complete_existing_wrong_provenance_blocks_without_gcs(self):
+        doc = valid_payload()
+        existing = rows_for(doc)
+        existing[2]["provenance"]["run_prefix"] = "different-run"
+        client = self.client(doc, existing)
+        with self.assertRaisesRegex(IngestionBlocked, "FORECAST_CONFLICT"):
+            run_once(
+                planta_id=1, site_code="24002",
+                lat=SITE_LAT, lon=SITE_LON, hours=24, prefix=RUN,
+                now=INITIAL + timedelta(hours=12),
+                publish=True, client=client,
+                read_point=lambda *a, **k: self.fail("no GCS call permitted"),
+            )
+        self.assertEqual(client.written, [])
+
+    def test_partial_existing_run_fetches_missing_horizon(self):
+        doc = valid_payload()
+        existing = rows_for(doc)[:10]
+        client = self.client(doc, existing)
+        loaded = []
+        def point(request, **kwargs):
+            loaded.append(request)
+            return doc
+        count = run_once(
+            planta_id=1, site_code="24002",
+            lat=SITE_LAT, lon=SITE_LON, hours=24, prefix=RUN,
+            now=INITIAL + timedelta(hours=12),
+            publish=True, client=client, read_point=point,
+        )
+        self.assertEqual(count, 14)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(len(client.written), 14)
+        self.assertEqual(len(client.saved), 24)
+
     def test_dry_run_does_not_use_supabase_even_with_valid_data(self):
         doc = valid_payload()
         class NoNetwork:
