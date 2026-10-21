@@ -38,7 +38,7 @@ NOT_RUN / ENVIRONMENT_BLOCKED.
 
 Permisos que solicitamos al proveedor: `roles/storage.objectViewer` (o equivalente con `storage.objects.get` + `storage.objects.list`) sobre `gs://weathernext3_statistics_spatial` (y no sobre `weathernext3_spatial`).
 
-### Borrador de solicitud a Google (no enviado)
+### Solicitud a Google (enviada por el operador a `weathernext@google.com` el 2026-10-21; sin respuesta aún)
 
 > **Asunto:** WeatherNext 3 Statistics — add service account to existing approval (GCS read)
 >
