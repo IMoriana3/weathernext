@@ -91,7 +91,7 @@ PR de esta rama: puente WIF → obstore, sonda del lector en `auth-check`, 5 tes
 2. Comprobar en Cloud Shell, con la cuenta humana, el objeto de A.7.
 3. Ruleset en `main` (Settings → Rules): exigir PR, check `offline-tests`, bloquear *force-push* y borrado. Hoy `main` no está protegida y cualquier push a `main` puede obtener el token de la SA y el secreto de Supabase.
 4. GitHub Environment `wn3-production` restringido a `main` con revisor obligatorio; mover `WN3_SUPABASE_SECRET_KEY` allí.
-5. Endurecer la condición del proveedor WIF (verificar la actual), p. ej.: `assertion.repository_id=='1425584477' && assertion.repository_owner_id=='168933412' && assertion.ref=='refs/heads/main' && assertion.workflow_ref.startsWith('IMoriana3/weathernext/.github/workflows/ingest.yml@refs/heads/main')`; si se usa el Environment, añadir `assertion.environment=='wn3-production'`.
+5. ~~Endurecer la condición del proveedor WIF~~ — HECHO (verificada por el operador, 2026-10-21): `attribute.repository_id=='1425584477' && attribute.repository_owner_id=='168933412' && attribute.ref=='refs/heads/main' && attribute.workflow_ref=='IMoriana3/weathernext/.github/workflows/ingest.yml@refs/heads/main'`. Correcta y mínima; sin cambios. Si se añade el Environment, se podrá sumar `assertion.environment=='wn3-production'`.
 6. Autorizar (o no) el bucket de checkpoints y activar `WN3_INGESTION_APPROVED`.
 
 **Puedo completar vía GitHub:** este PR (fix + sonda + tests + doc), el modo `dry-run` del workflow, el job de *freshness*/alertas, la matriz multi-planta y el diseño de checkpoints persistentes, siempre por PR y sin activar publicación.
