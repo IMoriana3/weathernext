@@ -25,6 +25,8 @@ class IngestWorkflowSafetyTests(unittest.TestCase):
         self.assertIn("WN3_GCP_AUTH_AND_LIST_OK", before_publish)
         self.assertIn("gcloud auth print-access-token >/dev/null", before_publish)
         self.assertIn("gcloud storage ls", before_publish)
+        self.assertIn("20261019_06hr_01_preds/predictions.zarr/zarr.json", before_publish)
+        self.assertNotIn("2026_to_present/ >/dev/null", before_publish)
         self.assertNotIn("scheduled_ingest.py", before_publish)
         self.assertNotIn("WN3_SUPABASE_SECRET_KEY", before_publish)
         self.assertNotIn("secrets.", before_publish)
