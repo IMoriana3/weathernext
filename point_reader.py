@@ -307,6 +307,57 @@ def require_complete_quantiles(result: dict) -> None:
                     f"{field} missing at lead hour {sample['lead_hour']}"
                 )
 
+GCS_READ_ONLY_SCOPE = "https://www.googleapis.com/auth/devstorage.read_only"
+
+
+def _gcs_auth_options():
+    """Bridge Workload Identity Federation ADC into obstore, read-only scope.
+
+    obstore's native GCS client only decodes ``service_account`` and
+    ``authorized_user`` ADC files; the ``external_account`` file written by
+    google-github-actions/auth (OIDC/WIF) fails with "unknown variant
+    external_account". Only that case is delegated to google-auth; Cloud
+    Shell and other ambient identities keep obstore's unchanged lookup.
+    """
+    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not path:
+        return {}
+    try:
+        kind = json.loads(Path(path).read_text(encoding="utf-8")).get("type")
+    except (OSError, ValueError, AttributeError):
+        return {}  # obstore reports its own categorized credential error
+    if kind != "external_account":
+        return {}
+    import google.auth
+    from obstore.auth.google import GoogleCredentialProvider
+
+    credentials, _ = google.auth.default(scopes=[GCS_READ_ONLY_SCOPE])
+    return {"credential_provider": GoogleCredentialProvider(credentials)}
+
+
+def probe_root_metadata(prefix: str) -> int:
+    """Read only the run's root zarr.json through the production GCS client.
+
+    Proves the same identity path the ingester uses can GET a real object.
+    Returns the Zarr format; no forecast arrays or values are read.
+    """
+    run_limits(prefix)
+    if os.environ.get("GOOGLE_SKIP_SIGNATURE", "").lower() == "true":
+        raise ValueError("anonymous access is not allowed for this dataset")
+    import obstore
+    from obstore.store import GCSStore
+
+    store = GCSStore(bucket=BUCKET, prefix=prefix, **_gcs_auth_options())
+    raw = bytes(obstore.get(store, "zarr.json").bytes())
+    try:
+        meta = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError("root zarr.json is not valid JSON") from exc
+    if not isinstance(meta, dict) or meta.get("zarr_format") != 3:
+        raise ValueError("root metadata is not Zarr v3")
+    return 3
+
+
 def read_gcs_point(request: PointRequest, *, progress=None,
                    fetch_mode="parallel", checkpoint_dir=None,
                    strict_quantiles=False):
@@ -321,10 +372,12 @@ def read_gcs_point(request: PointRequest, *, progress=None,
     emit("METADATA: connecting to authorized GCS Zarr store")
     if checkpoint_dir is not None and fetch_mode != "direct":
         raise ValueError("checkpoints require direct mode")
-    options = {}
+    options = _gcs_auth_options()
     if fetch_mode == "direct":
-        options = {"client_options": {"timeout": "30s", "connect_timeout": "10s"},
-                   "retry_config": {"max_retries": 2, "retry_timeout": timedelta(seconds=60)}}
+        options.update({
+            "client_options": {"timeout": "30s", "connect_timeout": "10s"},
+            "retry_config": {"max_retries": 2, "retry_timeout": timedelta(seconds=60)},
+        })
     store = GCSStore(bucket=BUCKET, prefix=request.prefix, **options)
     dataset = xr.open_zarr(ObjectStore(store),
                            chunks=None if fetch_mode == "direct" else {})

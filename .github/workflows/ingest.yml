@@ -66,7 +66,21 @@ jobs:
           # operator's 360-hour historical replay; no forecast data is read.
           timeout 90s gcloud storage ls \
             gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr/zarr.json >/dev/null
+          # Discovery needs storage.objects.list on one dated prefix too.
+          timeout 90s gcloud storage ls \
+            "gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_*" >/dev/null
           echo "WN3_GCP_AUTH_AND_LIST_OK (no Supabase write or forecast export)"
+      - name: Install pinned transport dependencies for reader probe
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check' }}
+        run: python -m pip install --no-cache-dir -r requirements.txt
+      - name: Check the ingest GCS client (obstore + WIF ADC) reads root metadata
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # gcloud success does not prove obstore can use the same WIF ADC.
+          timeout 120s python -m scripts.probe_metadata \
+            --run-prefix weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr
       - name: Install pinned transport dependencies
         if: ${{ vars.WN3_INGESTION_APPROVED == 'true' && (github.event_name == 'schedule' || inputs.mode == 'publish') }}
         run: python -m pip install --no-cache-dir -r requirements.txt
