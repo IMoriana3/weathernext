@@ -60,8 +60,12 @@ jobs:
           set -euo pipefail
           test -n "${GOOGLE_APPLICATION_CREDENTIALS:-}"
           timeout 30s gcloud auth print-access-token >/dev/null
+          # Probe an exact, previously read real Zarr v3 metadata object.
+          # A directory-like prefix may trigger a misleading object GET on
+          # a nonexistent folder. This source object was certified by the
+          # operator's 360-hour historical replay; no forecast data is read.
           timeout 90s gcloud storage ls \
-            gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/ >/dev/null
+            gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr/zarr.json >/dev/null
           echo "WN3_GCP_AUTH_AND_LIST_OK (no Supabase write or forecast export)"
       - name: Install pinned transport dependencies
         if: ${{ vars.WN3_INGESTION_APPROVED == 'true' && (github.event_name == 'schedule' || inputs.mode == 'publish') }}
