@@ -31,6 +31,12 @@ class IngestWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("WN3_SUPABASE_SECRET_KEY", before_publish)
         self.assertNotIn("secrets.", before_publish)
 
+    def test_auth_check_exercises_ingest_reader_identity_path(self):
+        before_publish = self.text.split(
+            "      - name: Install pinned transport dependencies\n")[0]
+        self.assertIn("python -m scripts.probe_metadata", before_publish)
+        self.assertIn('2026_to_present/20261019_*"', before_publish)
+
     def test_publication_is_gated_and_secret_scoped_to_publish_step(self):
         marker = "      - name: Discover, validate and conditionally publish native point forecast"
         part = self.text.split(marker)[1]

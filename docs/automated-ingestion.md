@@ -63,7 +63,8 @@ Review your GitHub Actions usage/billing and GCP/Supabase terms before enabling 
 | HECHO | Historical 360h transport/import verified from Google Cloud Shell and Supabase readback |
 | INTENCIONAL | New gated worker uses canonical existing point reader and Supabase row mapper |
 | APROXIMACIÓN | 9h dissemination buffer and 42h max-age window are heuristics, not provider SLA |
-| UNKNOWN | Google WIF + obstore ADC compatibility, scheduled runtime, operating cost and first real automated run |
+| BUG (fixed) | obstore 0.12 cannot decode WIF `external_account` ADC; `point_reader._gcs_auth_options` bridges it via google-auth, read-only scope. See `docs/wif-access-diagnosis.md` |
+| UNKNOWN | Provider allowlisting of the service account (current 403), scheduled runtime, operating cost and first real automated run |
 | LEGACY | Manual-only Cloud Shell script remains available for approved historical diagnostics |
 
 **WeatherContract v2 is owned by `IMoriana3/SolarGPTfull`** and still requires canonical GHI/DNI/DHI semantics. Storing native `surface_solar_radiation_downwards_1hr` does not build that contract, nor calibrate forecast uncertainty or permit STOW decisions.
