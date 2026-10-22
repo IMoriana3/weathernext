@@ -38,7 +38,13 @@ NOT_RUN / ENVIRONMENT_BLOCKED.
 
 Permisos que solicitamos al proveedor: `roles/storage.objectViewer` (o equivalente con `storage.objects.get` + `storage.objects.list`) sobre `gs://weathernext3_statistics_spatial` (y no sobre `weathernext3_spatial`).
 
-### Solicitud a Google (enviada por el operador a `weathernext@google.com` el 2026-10-21; sin respuesta aún)
+### Solicitud a Google
+
+- 2026-10-21: correo enviado a `weathernext@google.com` (texto abajo).
+- 2026-10-22: el equipo WeatherNext responde que **cada cuenta adicional requiere su propio envío del Data Request Form**. HECHO: el alta es por identidad vía formulario.
+- 2026-10-22: el operador envía el formulario para `wn3-ingest@auspicious-silo-445105-d4.iam.gserviceaccount.com`. Pendiente de aprobación; se comprobará con `auth-check`, no por correo.
+
+Texto del correo enviado:
 
 > **Asunto:** WeatherNext 3 Statistics — add service account to existing approval (GCS read)
 >
