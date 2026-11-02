@@ -15,7 +15,7 @@ class IngestWorkflowSafetyTests(unittest.TestCase):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
     def test_safe_manual_mode_is_default_and_not_scheduled(self):
-        self.assertIn('options: ["auth-check", "publish"]', self.text)
+        self.assertIn('options: ["auth-check", "dry-run", "publish"]', self.text)
         self.assertIn('default: "auth-check"', self.text)
         self.assertIn('vars.WN3_INGESTION_APPROVED == \'true\'', self.text)
         self.assertIn('github.event_name == \'workflow_dispatch\'', self.text)
@@ -30,6 +30,24 @@ class IngestWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("scheduled_ingest.py", before_publish)
         self.assertNotIn("WN3_SUPABASE_SECRET_KEY", before_publish)
         self.assertNotIn("secrets.", before_publish)
+
+    def test_auth_check_exercises_ingest_reader_identity_path(self):
+        before_publish = self.text.split(
+            "      - name: Install pinned transport dependencies\n")[0]
+        self.assertIn("python -m scripts.probe_metadata", before_publish)
+        self.assertIn('2026_to_present/20261019_*"', before_publish)
+
+    def test_dry_run_reads_real_forecast_without_secret_or_publish(self):
+        marker = ("      - name: Dry-run discover, read and validate a real "
+                  "forecast without publishing")
+        step = self.text.split(marker)[1].split("      - name:")[0]
+        self.assertIn("inputs.mode == 'dry-run'", step)
+        self.assertIn("python scheduled_ingest.py", step)
+        self.assertNotIn("--publish", step)
+        self.assertNotIn("secrets.", step)
+        self.assertNotIn("WN3_SUPABASE", step)
+        self.assertNotIn("WN3_INGESTION_APPROVED", step)
+        self.assertNotIn("upload-artifact", self.text)
 
     def test_publication_is_gated_and_secret_scoped_to_publish_step(self):
         marker = "      - name: Discover, validate and conditionally publish native point forecast"

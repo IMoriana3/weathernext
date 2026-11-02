@@ -356,5 +356,98 @@ class AuthorizationTests(unittest.TestCase):
         self.assertNotIn("service_role", source)
 
 
+class WorkloadIdentityBridgeTests(unittest.TestCase):
+    """obstore cannot decode external_account ADC; google-auth must bridge it."""
+
+    def _adc(self, kind):
+        import json
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8")
+        with handle:
+            json.dump({"type": kind}, handle)
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def _modules(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import MagicMock
+        google = ModuleType("google")
+        auth = ModuleType("google.auth")
+        creds = object()
+        auth.default = MagicMock(return_value=(creds, None))
+        google.auth = auth
+        ob = ModuleType("obstore")
+        ob_auth = ModuleType("obstore.auth")
+        ob_google = ModuleType("obstore.auth.google")
+        ob_google.GoogleCredentialProvider = MagicMock(return_value="provider")
+        modules = {"google": google, "google.auth": auth, "obstore": ob,
+                   "obstore.auth": ob_auth, "obstore.auth.google": ob_google}
+        return patch.dict(sys.modules, modules), auth, ob_google, creds
+
+    def test_external_account_uses_google_auth_read_only_provider(self):
+        from point_reader import GCS_READ_ONLY_SCOPE, _gcs_auth_options
+        mods, auth, ob_google, creds = self._modules()
+        env = {"GOOGLE_APPLICATION_CREDENTIALS": self._adc("external_account")}
+        with mods, patch.dict(os.environ, env):
+            options = _gcs_auth_options()
+        self.assertEqual(options, {"credential_provider": "provider"})
+        auth.default.assert_called_once_with(scopes=[GCS_READ_ONLY_SCOPE])
+        ob_google.GoogleCredentialProvider.assert_called_once_with(creds)
+
+    def test_cloud_shell_and_key_types_keep_native_obstore_lookup(self):
+        from point_reader import _gcs_auth_options
+        mods, auth, _, _ = self._modules()
+        for kind in ("authorized_user", "service_account"):
+            env = {"GOOGLE_APPLICATION_CREDENTIALS": self._adc(kind)}
+            with mods, patch.dict(os.environ, env):
+                self.assertEqual(_gcs_auth_options(), {})
+        with mods, patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_gcs_auth_options(), {})
+        auth.default.assert_not_called()
+
+    def test_direct_reader_passes_provider_to_gcs_store(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import MagicMock
+        store = ModuleType("obstore.store")
+        store.GCSStore = MagicMock(return_value=object())
+        zarr_storage = ModuleType("zarr.storage")
+        zarr_storage.ObjectStore = MagicMock(return_value=object())
+        mods = {"obstore": ModuleType("obstore"), "obstore.store": store,
+                "zarr": ModuleType("zarr"), "zarr.storage": zarr_storage}
+        with patch.dict(sys.modules, mods), \
+                patch("point_reader._gcs_auth_options",
+                      return_value={"credential_provider": "provider"}), \
+                patch("xarray.open_zarr", return_value=fake_dataset(hours=3)):
+            read_gcs_point(PointRequest(0, 0, SYNOPTIC, 3), fetch_mode="direct")
+        kwargs = store.GCSStore.call_args.kwargs
+        self.assertEqual(kwargs["credential_provider"], "provider")
+        self.assertIn("retry_config", kwargs)
+
+    def test_probe_reads_only_root_metadata_and_requires_zarr_v3(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import MagicMock
+        from point_reader import probe_root_metadata
+        ob = ModuleType("obstore")
+        store = ModuleType("obstore.store")
+        store.GCSStore = MagicMock(return_value="store")
+        result = MagicMock()
+        ob.get = MagicMock(return_value=result)
+        mods = {"obstore": ob, "obstore.store": store}
+        with patch.dict(sys.modules, mods), \
+                patch("point_reader._gcs_auth_options", return_value={}):
+            result.bytes.return_value = b'{"zarr_format": 3}'
+            self.assertEqual(probe_root_metadata(SYNOPTIC), 3)
+            ob.get.assert_called_once_with("store", "zarr.json")
+            result.bytes.return_value = b'{"zarr_format": 2}'
+            with self.assertRaisesRegex(ValueError, "not Zarr v3"):
+                probe_root_metadata(SYNOPTIC)
+        with self.assertRaisesRegex(ValueError, "approved-format"):
+            probe_root_metadata("not/a/run")
+
+
 if __name__ == "__main__":
     unittest.main()

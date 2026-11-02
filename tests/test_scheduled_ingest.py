@@ -267,6 +267,28 @@ class IngestTests(TestCase):
             client=NoNetwork(), read_point=lambda req, **kwargs: doc,
         ), 0)
 
+    def test_dry_run_cli_never_builds_supabase_client_or_needs_secret(self):
+        argv = [
+            "--planta-id", "1", "--site-code", "24002",
+            "--lat", str(SITE_LAT), "--lon", str(SITE_LON), "--hours", "24",
+        ]
+        seen = {}
+
+        def fake_run_once(**kwargs):
+            seen.update(kwargs)
+            return 0
+
+        with patch.dict("os.environ", {}, clear=True), \
+                patch("scheduled_ingest.discover_recent_synoptic",
+                      return_value=RUN), \
+                patch("scheduled_ingest.ProtectedSupabase",
+                      side_effect=AssertionError("no Supabase in dry-run")), \
+                patch("scheduled_ingest.run_once", side_effect=fake_run_once):
+            self.assertEqual(main(argv), 0)
+        self.assertIs(seen["publish"], False)
+        self.assertIsNone(seen["client"])
+        self.assertEqual(seen["prefix"], RUN)
+
     def test_privileged_write_requires_explicit_approval_before_discovery(self):
         argv = [
             "--planta-id", "1", "--site-code", "24002",
