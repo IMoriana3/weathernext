@@ -49,6 +49,22 @@ class IngestWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("WN3_INGESTION_APPROVED", step)
         self.assertNotIn("upload-artifact", self.text)
 
+    def test_schedule_needs_its_own_approval_separate_from_manual_publish(self):
+        job_if = self.text.split("  ingest:\n    if: ")[1].split("\n")[0]
+        self.assertIn("vars.WN3_SCHEDULE_APPROVED == 'true'", job_if)
+        self.assertIn("github.event_name == 'schedule' && "
+                      "vars.WN3_SCHEDULE_APPROVED == 'true'", job_if)
+        self.assertIn("github.event_name == 'workflow_dispatch' && "
+                      "inputs.mode == 'publish'", job_if)
+        marker = "      - name: Discover, validate and conditionally publish native point forecast"
+        publish_if = self.text.split(marker)[1].split("\n")[1]
+        self.assertIn("vars.WN3_INGESTION_APPROVED == 'true'", publish_if)
+        self.assertIn("github.event_name == 'schedule' && "
+                      "vars.WN3_SCHEDULE_APPROVED == 'true'", publish_if)
+        # The legacy single-variable schedule gate must not come back.
+        self.assertNotIn("(github.event_name == 'schedule' || inputs.mode == 'publish')",
+                         self.text)
+
     def test_publication_is_gated_and_secret_scoped_to_publish_step(self):
         marker = "      - name: Discover, validate and conditionally publish native point forecast"
         part = self.text.split(marker)[1]
