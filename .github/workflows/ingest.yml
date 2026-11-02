@@ -1,18 +1,19 @@
 name: WeatherNext 3 approved ingestion
 
-# Manual auth-check does not require Supabase credentials or publishing approval.
-# Publication and scheduled cycles require explicit repository approval.
+# Manual auth-check and dry-run do not require Supabase credentials or
+# publishing approval. Publication and scheduled cycles require explicit
+# repository approval.
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Test Google identity only, or publish an approved run"
+        description: "auth-check: identity only; dry-run: read+validate real forecast, no DB write; publish: approved write"
         type: choice
-        options: ["auth-check", "publish"]
+        options: ["auth-check", "dry-run", "publish"]
         default: "auth-check"
         required: true
       hours:
-        description: "Forecast horizon for an approved publish run"
+        description: "Forecast horizon for a dry-run or approved publish run"
         type: choice
         options: ["24", "72", "360"]
         default: "24"
@@ -29,7 +30,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check') || vars.WN3_INGESTION_APPROVED == 'true' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auth-check' || inputs.mode == 'dry-run')) || vars.WN3_INGESTION_APPROVED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
@@ -70,8 +71,8 @@ jobs:
           timeout 90s gcloud storage ls \
             "gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_*" >/dev/null
           echo "WN3_GCP_AUTH_AND_LIST_OK (no Supabase write or forecast export)"
-      - name: Install pinned transport dependencies for reader probe
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check' }}
+      - name: Install pinned transport dependencies for reader probe or dry-run
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.mode == 'auth-check' || inputs.mode == 'dry-run') }}
         run: python -m pip install --no-cache-dir -r requirements.txt
       - name: Check the ingest GCS client (obstore + WIF ADC) reads root metadata
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'auth-check' }}
@@ -81,6 +82,27 @@ jobs:
           # gcloud success does not prove obstore can use the same WIF ADC.
           timeout 120s python -m scripts.probe_metadata \
             --run-prefix weathernext_3_0_0_statistics/zarr/2026_to_present/20261019_06hr_01_preds/predictions.zarr
+      - name: Dry-run discover, read and validate a real forecast without publishing
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'dry-run' }}
+        shell: bash
+        env:
+          WN3_PLANTA_ID: ${{ vars.WN3_PLANTA_ID }}
+          WN3_SITE_CODE: ${{ vars.WN3_SITE_CODE }}
+          WN3_SITE_LAT: ${{ vars.WN3_SITE_LAT }}
+          WN3_SITE_LON: ${{ vars.WN3_SITE_LON }}
+          WN3_HOURS: ${{ inputs.hours }}
+        run: |
+          set -euo pipefail
+          # Read-only: no database credentials and no write flag, so
+          # run_once stops at VALIDATED_NOT_PUBLISHED. Values stay in the
+          # ephemeral runner temp dir; no artifact upload, no values logged.
+          python scheduled_ingest.py \
+            --planta-id "$WN3_PLANTA_ID" \
+            --site-code "$WN3_SITE_CODE" \
+            --lat "$WN3_SITE_LAT" \
+            --lon "$WN3_SITE_LON" \
+            --hours "$WN3_HOURS" \
+            --checkpoint-dir "$RUNNER_TEMP/wn3-point-checkpoints"
       - name: Install pinned transport dependencies
         if: ${{ vars.WN3_INGESTION_APPROVED == 'true' && (github.event_name == 'schedule' || inputs.mode == 'publish') }}
         run: python -m pip install --no-cache-dir -r requirements.txt

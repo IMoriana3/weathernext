@@ -75,7 +75,7 @@ PR de esta rama: puente WIF → obstore, sonda del lector en `auth-check`, 5 tes
 |---|---|---|
 | 0 | Branch protection/ruleset y Environment (ver F) | Configurado antes de cualquier `publish`. |
 | 1 | `auth-check` | 3 sondas OK (token, list+get gcloud, `zarr.json` vía obstore). |
-| 2 | Ensayo sin escritura: ejecutar `scheduled_ingest.py` **sin** `--publish` en un `workflow_dispatch` (requiere añadir un modo `dry-run` al workflow; PROPUESTA, no incluido aquí para no ampliar el PR) | `VALIDATED_NOT_PUBLISHED: rows=24`; duración y nº de peticiones GCS registradas. |
+| 2 | Ensayo sin escritura: `ingest.yml` con `mode=dry-run`, `hours=24`. Ejecuta `scheduled_ingest.py` **sin** credenciales de Supabase ni flag de escritura; no requiere `WN3_INGESTION_APPROVED` | `RUN_ACCEPTED` + `VALIDATED_NOT_PUBLISHED: rows=24`; anotar duración del job. |
 | 3 | `WN3_INGESTION_APPROVED=true` + `mode=publish`, `hours=24` | `VERIFIED_AFTER_WRITE: rows=24 newly_inserted=24`; filas del ciclo 20261019_06 intactas (consulta por `init_time`, 360 filas, mismos valores). |
 | 4 | Repetir el mismo ciclo | `EXISTING_RUN_VERIFIED_NO_FETCH` (0 lecturas GCS). |
 | 5 | Siguiente ejecución programada | Nuevo `init_time`, 24 filas, sin mezclar inicializaciones. |
