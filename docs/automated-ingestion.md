@@ -33,7 +33,8 @@ All settings below belong to the **GitHub repository's** Actions secrets and var
 | Variable | `WN3_SITE_LAT` / `WN3_SITE_LON` | Operator-approved WGS84 coordinates for the same plant |
 | Variable | `WN3_GCP_WIF_PROVIDER` | Approved Google Workload Identity Federation provider resource name |
 | Variable | `WN3_GCP_SERVICE_ACCOUNT` | GCP service-account email with the minimum approved GCS object listing/reading rights |
-| Variable | `WN3_INGESTION_APPROVED` | **Must remain absent/false until acceptance**; exact `true` enables scheduled runs |
+| Variable | `WN3_INGESTION_APPROVED` | **Must remain absent/false until acceptance**; exact `true` enables **manual** `mode=publish` only |
+| Variable | `WN3_SCHEDULE_APPROVED` | Absent/false until manual publish and idempotent repeat are verified; exact `true` (together with `WN3_INGESTION_APPROVED=true`) enables **scheduled** publication |
 
 Set Google Workload Identity Federation to trust **only** this repository's main-branch workflow identity. The GitHub OIDC request grants temporary credentials; **no service-account JSON key should be stored**. Ensure the account is authorized by the dataset provider for the relevant GCS Statistics resources; an unrelated GCP account is insufficient.
 
@@ -44,16 +45,16 @@ Review your GitHub Actions usage/billing and GCP/Supabase terms before enabling 
 1. Merge only after offline CI is green. The scheduled/publish path remains disabled by default.
 2. Configure **only** `WN3_GCP_WIF_PROVIDER` and `WN3_GCP_SERVICE_ACCOUNT` repository variables. Keep `WN3_INGESTION_APPROVED=false` (or absent). Manually run `WeatherNext 3 approved ingestion` → `Run workflow` → `main` → `mode=auth-check`. This tests ephemeral Google OIDC credentials and the `storage.objects.get` permission on the **exact native Zarr v3 `zarr.json` metadata object** of the already-certified historical run `20261019_06hr_01_preds`, not a virtual prefix/folder. It reads no meteorological chunk arrays and requires no Supabase secret. The metadata object is a diagnostic dependency: if Google removes that historical object, the test must be updated to a verified recent run rather than declaring all GCS access denied. `WN3_GCP_AUTH_AND_LIST_OK` confirms the identity/list operation, not a full source read or publishing authorization.
 3. If auth-check fails (`403`, identity exchange, or inaccessible bucket), **do not enable publishing**. Fix the granted Google identity/provider dataset access first; Cloud Shell human access does not automatically grant service-account access. Protect the `main` branch and review Google/GitHub cost and usage limits.
-4. Configure the approved El Burgo plant variables and a protected, newly minted backend `sb_secret_...` key in **repository secrets** (`WN3_SUPABASE_SECRET_KEY`). Then, only with explicit operator approval, set `WN3_INGESTION_APPROVED=true` and dispatch `mode=publish`, `hours=24`; observe the fresh run and check that all 24 hours/288 native scalar values were inserted and independently read back.
-5. Verify repeat triggers are idempotent and a new run becomes available without Cloud Shell. If diagnostics fail, set the approval variable back to false. Scheduled GitHub Actions can be delayed or disabled in inactive public repositories.
+4. Configure the approved El Burgo plant variables and a protected, newly minted backend `sb_secret_...` key in **repository secrets** (`WN3_SUPABASE_SECRET_KEY`). Then, only with explicit operator approval, set `WN3_INGESTION_APPROVED=true` (leave `WN3_SCHEDULE_APPROVED` absent) and dispatch `mode=publish`, `hours=24`; observe the fresh run and check that all 24 hours/288 native scalar values were inserted and independently read back.
+5. Verify repeat triggers are idempotent and a new run becomes available without Cloud Shell; only then set `WN3_SCHEDULE_APPROVED=true`. If diagnostics fail, set the approval variables back to false. Scheduled GitHub Actions can be delayed or disabled in inactive public repositories.
 6. Only after measured performance, consider 72h and 360h unattended. Hosted GitHub runners have **ephemeral local checkpoints**, so 360h recovery across separate jobs is not yet durable. A private persistent store or authorized dedicated runner needs engineering and explicit approval.
 
 ### Workflow defaults
 
-- UTC schedule at `06:17` and `18:17` (twice daily); most recent mature synoptic run, 24h horizon. Manual `auth-check` mode is allowed without publication approval, and has no Supabase secrets. Manual `publish` and all scheduled runs require the `WN3_INGESTION_APPROVED=true` variable.
+- UTC schedule at `06:17` and `18:17` (twice daily); most recent mature synoptic run, 24h horizon. Manual `auth-check` mode is allowed without publication approval, and has no Supabase secrets. Manual `publish` requires `WN3_INGESTION_APPROVED=true`; scheduled runs additionally require `WN3_SCHEDULE_APPROVED=true`, so manual publication can be validated without enabling the timer.
 - `timeout-minutes: 150`, no unbounded retries, at most 360×12 native values per point.
 - `concurrency` serializes scheduled/manual tasks; `contents: read`, `id-token: write` only.
-- Job-level condition allows only `auth-check` in manual mode while approval is false. The ingestion step itself checks exact `WN3_INGESTION_APPROVED == 'true'` and either a scheduled trigger or manual `mode=publish`.
+- Job-level condition allows only `auth-check`/`dry-run` in manual mode while approval is false. The ingestion step itself checks exact `WN3_INGESTION_APPROVED == 'true'` and either manual `mode=publish` or a scheduled trigger with `WN3_SCHEDULE_APPROVED == 'true'`.
 - No public artifacts or raw forecast values in logs.
 
 ### Distinguishing classifications

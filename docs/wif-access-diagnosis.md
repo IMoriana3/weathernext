@@ -69,6 +69,17 @@ Texto del correo enviado:
 
 PR de esta rama: puente WIF → obstore, sonda del lector en `auth-check`, 5 tests offline nuevos (122 en total, PASSED en local con Python 3.13; CI con 3.12). Sin cambios en tablas, contratos, filas ni en la puerta `WN3_INGESTION_APPROVED`.
 
+## Resultados reales tras la aprobación de Google (2026-11-02, `main` @ `ed057ec`)
+
+| Run | Modo | Resultado | Evidencia |
+|---|---|---|---|
+| [41370926529](https://github.com/IMoriana3/weathernext/actions/runs/41370926529) | `auth-check` | PASSED | `WN3_GCP_AUTH_AND_LIST_OK` y `WN3_READER_ZARR_V3_METADATA_OK`: Google autorizó la SA y el puente WIF → obstore funciona contra GCS real. |
+| [41371402738](https://github.com/IMoriana3/weathernext/actions/runs/41371402738) | `dry-run` | FAILED (configuración) | Variables de planta sin definir: `argument --planta-id: invalid int value: ''`. No llegó a leer de Google. Corregido por el operador. |
+| [41371871328](https://github.com/IMoriana3/weathernext/actions/runs/41371871328) | `dry-run`, 24 h | PASSED | Ciclo `20261101_18hr` descartado por madurez (< 9 h); elegido **`20261101_12hr`** (`init_utc=2026-11-01T12:00Z`). 24 h × 12 campos = 288 valores, 0 reintentos, `VALIDATED_NOT_PUBLISHED: rows=24`. Sin valores en el log y sin escritura en Supabase. |
+
+HECHO: la descarga de 24 h tardó **≈ 35 s** (≈ 1,5 s/hora con 4 lecturas en paralelo), y el job completo ≈ 1 min 20 s.
+INFERENCIA: a ese ritmo, 360 h ≈ 9 min en un único job, muy por debajo del `timeout-minutes: 150`. Si un dry-run de 360 h lo confirma, **no harían falta checkpoints persistentes** entre ejecuciones (ver E).
+
 ## D. Plan de validación de la primera ingesta real
 
 | Paso | Acción | Criterio de aceptación |
@@ -76,14 +87,14 @@ PR de esta rama: puente WIF → obstore, sonda del lector en `auth-check`, 5 tes
 | 0 | Branch protection/ruleset y Environment (ver F) | Configurado antes de cualquier `publish`. |
 | 1 | `auth-check` | 3 sondas OK (token, list+get gcloud, `zarr.json` vía obstore). |
 | 2 | Ensayo sin escritura: `ingest.yml` con `mode=dry-run`, `hours=24`. Ejecuta `scheduled_ingest.py` **sin** credenciales de Supabase ni flag de escritura; no requiere `WN3_INGESTION_APPROVED` | `RUN_ACCEPTED` + `VALIDATED_NOT_PUBLISHED: rows=24`; anotar duración del job. |
-| 3 | `WN3_INGESTION_APPROVED=true` + `mode=publish`, `hours=24` | `VERIFIED_AFTER_WRITE: rows=24 newly_inserted=24`; filas del ciclo 20261019_06 intactas (consulta por `init_time`, 360 filas, mismos valores). |
+| 3 | `WN3_INGESTION_APPROVED=true` (sin `WN3_SCHEDULE_APPROVED`) + `mode=publish`, `hours=24` | `VERIFIED_AFTER_WRITE: rows=24 newly_inserted=24`; filas del ciclo 20261019_06 intactas (consulta por `init_time`, 360 filas, mismos valores). El temporizador no publica. |
 | 4 | Repetir el mismo ciclo | `EXISTING_RUN_VERIFIED_NO_FETCH` (0 lecturas GCS). |
-| 5 | Siguiente ejecución programada | Nuevo `init_time`, 24 filas, sin mezclar inicializaciones. |
+| 5 | Activar `WN3_SCHEDULE_APPROVED=true`; siguiente ejecución programada | Nuevo `init_time`, 24 filas, sin mezclar inicializaciones. |
 
 ## E. Arquitectura 24/72/360 h
 
 - **Selección de ciclo (APROXIMACIÓN):** con el cron 06:17/18:17 y la madurez mínima de 9 h, sólo se seleccionan los ciclos **18Z y 06Z**; 00Z y 12Z nunca se ingieren. Si se quieren los cuatro, cron cada 6 h a `:17` desplazado (p. ej. `17 3,9,15,21 * * *` → 18Z, 00Z, 06Z, 12Z con ~9 h de margen). DECISIÓN pendiente de coste.
-- **Checkpoints persistentes:** el repo es **público**: no usar caché/artefactos de Actions para datos licenciados (las cachés de `main` son restaurables desde ramas). PROPUESTA: bucket privado propio `gs://<proyecto>-wn3-checkpoints` (región `europe-southwest1`), *uniform access*, *public access prevention*, *lifecycle delete* a 3 días, y a la SA sólo `roles/storage.objectUser` sobre ese bucket con condición de prefijo `planta_<id>/<init>/`. Clave de checkpoint = (planta, celda, `run_prefix`, campo, ventana de leads), validada contra `init_time` antes de reutilizar. Coste: KB por ciclo → céntimos/mes (infra de pago: requiere autorización).
+- **Checkpoints persistentes:** el repo es **público**: no usar caché/artefactos de Actions para datos licenciados (las cachés de `main` son restaurables desde ramas). PROPUESTA: bucket privado propio `gs://<proyecto>-wn3-checkpoints` (región `europe-southwest1`), *uniform access*, *public access prevention*, *lifecycle delete* a 3 días, y a la SA sólo `roles/storage.objectUser` sobre ese bucket con condición de prefijo `planta_<id>/<init>/`. Clave de checkpoint = (planta, celda, `run_prefix`, campo, ventana de leads), validada contra `init_time` antes de reutilizar. Coste: KB por ciclo → céntimos/mes (infra de pago: requiere autorización). **Actualización 2026-11-02:** con ≈ 1,5 s/hora medidos, 360 h caben en un job (≈ 9 min); pendiente de confirmar con un dry-run de 360 h antes de descartar esta propuesta.
 - **Escalado de horizonte:** 24 h en cada ciclo; 72 h y 360 h sólo para 00Z (o un ciclo/día), reanudando desde checkpoint persistente; el timeout de 150 min se mantiene como techo.
 - **Varias plantas:** una matriz por planta con `concurrency` por planta (`wn3-<planta_id>`); la celda y la identidad se verifican ya por fila. Agrupar plantas que compartan celda 0.1° para no duplicar lecturas.
 - **Observabilidad:** (a) fallo del job → notificación de GitHub + issue automática; (b) *freshness* en Supabase: alerta si `max(init_time)` por planta > 30 h; (c) registrar duración y nº de leads leídos (sin valores).
@@ -93,11 +104,11 @@ PR de esta rama: puente WIF → obstore, sonda del lector en `auth-check`, 5 tes
 
 **Requiere al operador** (permisos, cuentas o pagos que no controlo):
 
-1. Enviar formulario/correo a Google (borrador arriba) y compartir la respuesta.
-2. Comprobar en Cloud Shell, con la cuenta humana, el objeto de A.7.
-3. Ruleset en `main` (Settings → Rules): exigir PR, check `offline-tests`, bloquear *force-push* y borrado. Hoy `main` no está protegida y cualquier push a `main` puede obtener el token de la SA y el secreto de Supabase.
+1. ~~Enviar formulario/correo a Google~~ — HECHO: formulario enviado y aprobado; `auth-check` PASSED el 2026-11-02.
+2. ~~Comprobar en Cloud Shell~~ — HECHO (2026-10-21).
+3. ~~Ruleset en `main`~~ — HECHO (2026-11-02): `main` aparece protegida en la API de GitHub.
 4. GitHub Environment `wn3-production` restringido a `main` con revisor obligatorio; mover `WN3_SUPABASE_SECRET_KEY` allí.
 5. ~~Endurecer la condición del proveedor WIF~~ — HECHO (verificada por el operador, 2026-10-21): `attribute.repository_id=='1425584477' && attribute.repository_owner_id=='168933412' && attribute.ref=='refs/heads/main' && attribute.workflow_ref=='IMoriana3/weathernext/.github/workflows/ingest.yml@refs/heads/main'`. Correcta y mínima; sin cambios. Si se añade el Environment, se podrá sumar `assertion.environment=='wn3-production'`.
-6. Autorizar (o no) el bucket de checkpoints y activar `WN3_INGESTION_APPROVED`.
+6. Activar `WN3_INGESTION_APPROVED=true` para la primera publicación manual y, tras verificarla, `WN3_SCHEDULE_APPROVED=true` para el temporizador. El bucket de checkpoints sólo si el dry-run de 360 h no cabe en un job.
 
 **Puedo completar vía GitHub:** este PR (fix + sonda + tests + doc), el modo `dry-run` del workflow, el job de *freshness*/alertas, la matriz multi-planta y el diseño de checkpoints persistentes, siempre por PR y sin activar publicación.
